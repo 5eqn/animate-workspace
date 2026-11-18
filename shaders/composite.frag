@@ -9,6 +9,9 @@ uniform bool inverted;
 uniform vec2 motion;
 uniform vec2 canvas;
 uniform float strength;
+uniform ivec2 rhythm_grid;
+uniform int rhythm_filled;
+uniform ivec2 pixel_size;
 vec3 paper(vec2 p) {
     if (any(lessThan(p,vec2(0.0))) || any(greaterThan(p,vec2(1.0)))) return vec3(1.0);
     return texture(below,p).rgb;
@@ -18,6 +21,25 @@ vec3 hsv(vec3 c) {
     return c.z*mix(vec3(1.0),clamp(p-1.0,0.0,1.0),c.y);
 }
 void main() {
+    if(mode==6){
+        vec3 base=paper(uv);
+        int cell=max(2,int(floor(float(pixel_size.x)*5.0/1920.0)));
+        int gap=max(1,int(floor(float(pixel_size.x)*2.0/1920.0)));
+        int margin=max(8,int(floor(float(pixel_size.x)*24.0/1920.0)));
+        ivec2 extent=rhythm_grid*(cell+gap)-gap;
+        // All edges are integer framebuffer coordinates; no filtering/AA on the blocks.
+        ivec2 origin=ivec2(pixel_size.x-margin-extent.x,margin);
+        ivec2 p=ivec2(floor(gl_FragCoord.xy))-origin;
+        if(all(greaterThanEqual(p,ivec2(0)))&&all(lessThan(p,extent))){
+            ivec2 index=p/(cell+gap);ivec2 local=p%(cell+gap);
+            if(all(lessThan(local,ivec2(cell)))){
+                int beat=(rhythm_grid.y-1-index.y)*rhythm_grid.x+index.x;
+                base=vec3(beat<rhythm_filled?0.0:0.80);
+            }
+        }
+        color=vec4(base,1.0);return;
+    }
+
     vec3 a=paper(uv);
     vec3 b=texture(ink,uv).rgb;
     if (inverted) b=1.0-b;

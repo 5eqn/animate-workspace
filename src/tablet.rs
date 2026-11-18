@@ -5,6 +5,7 @@
 struct PenState {
     active: bool,
     pressure: f32,
+    angle: f32,
 }
 #[cfg(any(target_os = "macos", test))]
 impl Default for PenState {
@@ -12,6 +13,7 @@ impl Default for PenState {
         Self {
             active: false,
             pressure: 1.0,
+            angle: 0.0,
         }
     }
 }
@@ -21,6 +23,15 @@ trait TabletEvent {
     fn subtype(&self) -> i16;
     fn pressure(&self) -> f32;
     fn entering(&self) -> bool;
+    fn tilt(&self) -> [f32; 2];
+}
+#[cfg(any(target_os = "macos", test))]
+fn tilt_angle([x, y]: [f32; 2]) -> f32 {
+    if x * x + y * y > 1e-8 {
+        (-y).atan2(x)
+    } else {
+        0.0
+    }
 }
 #[cfg(any(target_os = "macos", test))]
 fn decode(event: &impl TabletEvent) -> Option<PenState> {
@@ -29,6 +40,7 @@ fn decode(event: &impl TabletEvent) -> Option<PenState> {
             PenState {
                 active: true,
                 pressure: 0.0,
+                angle: 0.0,
             }
         } else {
             PenState::default()
@@ -36,16 +48,19 @@ fn decode(event: &impl TabletEvent) -> Option<PenState> {
         23 => Some(PenState {
             active: true,
             pressure: event.pressure().clamp(0.0, 1.0),
+            angle: tilt_angle(event.tilt()),
         }),
         1 | 2 | 5 | 6 => match event.subtype() {
             1 => Some(PenState {
                 active: true,
                 pressure: event.pressure().clamp(0.0, 1.0),
+                angle: tilt_angle(event.tilt()),
             }),
             2 => Some(if event.entering() {
                 PenState {
                     active: true,
                     pressure: 0.0,
+                    angle: 0.0,
                 }
             } else {
                 PenState::default()
@@ -74,6 +89,10 @@ mod mac {
         }
         fn entering(&self) -> bool {
             self.isEnteringProximity()
+        }
+        fn tilt(&self) -> [f32; 2] {
+            let tilt = self.tilt();
+            [tilt.x as f32, tilt.y as f32]
         }
     }
     pub struct Tablet {
@@ -110,6 +129,10 @@ mod mac {
                 _handler: handler,
             }
         }
+        pub fn angle(&self) -> Option<f32> {
+            let state = self.state.get();
+            state.active.then_some(state.angle)
+        }
         pub fn pressure(&self) -> Option<f32> {
             let state = self.state.get();
             state.active.then_some(state.pressure)
@@ -131,6 +154,9 @@ pub use mac::Tablet;
 pub struct Tablet;
 #[cfg(not(target_os = "macos"))]
 impl Tablet {
+    pub fn angle(&self) -> Option<f32> {
+        None
+    }
     pub fn new(_ctx: eframe::egui::Context) -> Self {
         Self
     }
@@ -160,6 +186,13 @@ mod tests {
         }
         fn entering(&self) -> bool {
             self.entering.expect("Invalid NSEvent proximity accessor")
+        }
+        fn tilt(&self) -> [f32; 2] {
+            assert!(
+                self.kind == 23 || (matches!(self.kind, 1 | 2 | 5 | 6) && self.subtype == Some(1)),
+                "Invalid tilt accessor"
+            );
+            [0.3, 0.4]
         }
     }
     #[test]
@@ -216,5 +249,16 @@ mod tests {
             entering: None
         })
         .is_none());
+    }
+}
+
+#[cfg(test)]
+mod tilt_tests {
+    use super::*;
+    #[test]
+    fn tablet_tilt_uses_screen_coordinates_and_stays_continuous_at_zero() {
+        assert_eq!(tilt_angle([1.0, 0.0]), 0.0);
+        assert_eq!(tilt_angle([0.0, 1.0]), -std::f32::consts::FRAC_PI_2);
+        assert_eq!(tilt_angle([0.0, 0.0]), 0.0);
     }
 }

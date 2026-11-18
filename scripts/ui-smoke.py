@@ -21,6 +21,17 @@ def click(x,y,button=1):
     subprocess.run(['xdotool','mousemove',str(x),str(y),'click',str(button)],check=True)
     time.sleep(.25)
 
+def brush(name):
+    directions={'round':(720,425),'marker':(770,510),'liquify':(670,510)}
+    subprocess.run(['xdotool','mousemove','720','480','mousedown','3'],check=True)
+    time.sleep(.1)
+    x,y=directions[name]
+    subprocess.run(['xdotool','mousemove',str(x),str(y)],check=True)
+    time.sleep(.12)
+    if name=='marker':shot('brush-wheel')
+    subprocess.run(['xdotool','mouseup','3'],check=True)
+    time.sleep(.2)
+
 def edit(x,y,value):
     subprocess.run(['xdotool','mousemove',str(x),str(y),'click','--repeat','2','--delay','80','1'],check=True)
     key('ctrl+a')
@@ -64,18 +75,28 @@ with tempfile.TemporaryDirectory(prefix='mori-ui-') as temporary:
     try:
         shot('canvas')
         key('alt+2');shot('rhythm')
+        subprocess.run(['xdotool','mousemove','800','510'],check=True);time.sleep(.2);shot('import-audio-hover')
         key('ctrl+comma');shot('settings')
         for i,name in enumerate(['project','brushes','onion','playback','export','shortcuts']):
             click(90,124+i*48);shot('settings-'+name)
+        click(90,124);click(998,567)
+        click(72,51)
+        no_watermark=shot('project-watermark-off')
+        assert all(min(p[:3])>240 for p in no_watermark.crop((1185,390,1205,402)).getdata()),'Project watermark switch did not disable the mark'
+        key('ctrl+comma');click(90,124);click(998,567);click(998,617)
+        assert json.loads(prefs.read_text())['default_watermark'] is False
+        assert json.loads(prefs.read_text())['video_delay_ms']==-64
         click(72,51)
         returned=shot('back-to-timeline')
+        assert any(min(p[:3])<100 for p in returned.crop((1185,390,1205,402)).getdata()),'Default switch changed this project watermark'
+
         assert min(returned.getpixel((300,50))[:3])>240,'Settings Back did not return to P2'
         key('ctrl+comma');click(90,124)
         click(975,303);popup=shot('settings-grid-popup');dark_surface(popup,(930,345,1010,500));key('Escape')
         click(90,172)
-        edit(850,675,84)
+        edit(812,675,84)
         edit(967,675,360)
-        assert json.loads(prefs.read_text())['brush_defaults'][1]=={'ink':84.0,'liquify':360.0}
+        assert json.loads(prefs.read_text())['brush_defaults'][1]=={'ink':84.0,'liquify':360.0,'marker':42.0}
         click(90,268)
         # Edit a global preference through the actual UI, without saving a project.
         subprocess.run(['xdotool','mousemove','978','152','click','--repeat','2','--delay','80','1'],check=True)
@@ -91,7 +112,7 @@ with tempfile.TemporaryDirectory(prefix='mori-ui-') as temporary:
         redo=Image.open(out/'redo.png').convert('RGB').crop(crop)
         assert ImageChops.difference(tap,undo).getbbox(),'Undo did not change drawing'
         assert ImageChops.difference(tap,redo).getbbox() is None,'Redo did not restore drawing'
-        key('l');shot('liquify')
+        brush('liquify');shot('liquify')
         key('alt+2');click(90,615,3)
         menu=shot('layer-menu');dark_surface(menu,(96,565,326,950))
         click(277,630);popup=shot('layer-blend-popup');dark_surface(popup,(220,680,310,800))
@@ -116,6 +137,16 @@ with tempfile.TemporaryDirectory(prefix='mori-ui-') as temporary:
         assert ImageChops.difference(before_tempo,after_tempo).getbbox(),'Double click did not create a tempo start'
         click(830,559,3);shot('tempo-menu')
         edit(850,575,90);key('Escape');shot('tempo-edited')
+        before_frame=shot('before-frame-drag')
+        subprocess.run(['xdotool','mousemove','350','849','mousedown','1'],check=True)
+        time.sleep(.15)
+        subprocess.run(['xdotool','mousemove','455','849'],check=True)
+        time.sleep(.2)
+        shot('frame-drag-preview')
+        subprocess.run(['xdotool','mouseup','1'],check=True)
+        time.sleep(.3)
+        after_frame=shot('frame-moved')
+        assert ImageChops.difference(before_frame.crop((315,835,480,862)),after_frame.crop((315,835,480,862))).getbbox(),'Exposure drag did not change the timeline'
         # Zoom and pan operate on the ruler, with no separate slider.
         initial=shot('timeline-before-zoom').crop((225,442,1400,474))
         subprocess.run(['xdotool','mousemove','900','453','keydown','ctrl','click','--repeat','4','--delay','60','4','keyup','ctrl'],check=True)
@@ -136,13 +167,25 @@ with tempfile.TemporaryDirectory(prefix='mori-ui-') as temporary:
     # New process: preferences survive restart and pen sizes remain tool/layer specific.
     process=start(env,False)
     try:
-        ink0=cursor_size();key('l');liquid0=cursor_size()
+        fresh=shot('new-project-watermark-off')
+        assert all(min(p[:3])>240 for p in fresh.crop((1390,740,1430,774)).getdata()),'New project did not use the global watermark preference'
+        ink0=cursor_size();brush('liquify');liquid0=cursor_size()
         assert liquid0>ink0*10,'Liquify default is not substantially larger'
         key('bracketright');liquid0_changed=cursor_size();assert liquid0_changed>liquid0
         key('w');liquid1=cursor_size();assert liquid1>liquid0*1.4,'Global liquify default was not used by a new layer'
-        key('l');ink1=cursor_size();assert ink1>50,'Global ink default was not used by a new project'
+        brush('round');ink1=cursor_size();assert ink1>50,'Global ink default was not used by a new project'
         key('s');assert abs(cursor_size()-ink0)<=2,'Ink size leaked across layers'
-        key('l');assert abs(cursor_size()-liquid0_changed)<=2,'Liquify size did not survive tool/layer switches'
+        brush('liquify');assert abs(cursor_size()-liquid0_changed)<=2,'Liquify size did not survive tool/layer switches'
+        brush('marker');marker_size=cursor_size();shot('marker-cursor')
+        assert 28<marker_size<36,'Marker brush does not have its own size'
+        click(500,400)
+        subprocess.run(['xdotool','mousemove','550','430','mousedown','1'],check=True)
+        time.sleep(.1)
+        subprocess.run(['xdotool','mousemove','950','500'],check=True)
+        time.sleep(.15)
+        subprocess.run(['xdotool','mouseup','1'],check=True)
+        shot('marker-stroke')
+        key('z');key('z')
         key('ctrl+comma');click(90,268);shot('preferences-restored')
         assert json.loads(prefs.read_text())['video_delay_ms']==-125
         click(72,51)

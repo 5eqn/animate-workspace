@@ -114,7 +114,15 @@ fn label(
     );
 }
 fn row(ui: &mut egui::Ui, name: &str, control: impl FnOnce(&mut egui::Ui)) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 51.0), Sense::hover());
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 51.0), Sense::hover());
+    if response.hovered() {
+        ui.painter().rect_filled(
+            rect.expand2(Vec2::new(10.0, 0.0)),
+            5.0,
+            Color32::from_rgb(21, 24, 30),
+        );
+    }
     label(
         ui.painter(),
         Pos2::new(rect.left(), rect.center().y),
@@ -238,6 +246,58 @@ fn menu_row(ui: &mut egui::Ui, name: &str, control: impl FnOnce(&mut egui::Ui)) 
         control,
     );
 }
+fn wheel_directions() -> [(Brush, f32); 3] {
+    [
+        (Brush::Ink, -std::f32::consts::FRAC_PI_2),
+        (Brush::Marker, std::f32::consts::PI / 6.0),
+        (Brush::Liquify, 5.0 * std::f32::consts::PI / 6.0),
+    ]
+}
+fn wheel_choice(center: Pos2, pos: Pos2) -> Option<Brush> {
+    let d = pos - center;
+    if d.length() < 14.0 {
+        return None;
+    }
+    wheel_directions()
+        .into_iter()
+        .max_by(|(_, a), (_, b)| d.dot(Vec2::angled(*a)).total_cmp(&d.dot(Vec2::angled(*b))))
+        .map(|(brush, _)| brush)
+}
+fn brush_icon(p: &egui::Painter, c: Pos2, brush: Brush, color: Color32) {
+    match brush {
+        Brush::Ink => {
+            p.circle_filled(c, 9.0, color);
+        }
+        Brush::Marker => {
+            let corners = marker_corners(
+                Point {
+                    x: c.x,
+                    y: c.y,
+                    pressure: 1.0,
+                    angle: -0.5,
+                },
+                25.0,
+            )
+            .map(|p| Pos2::new(p[0], p[1]))
+            .to_vec();
+            p.add(egui::Shape::convex_polygon(corners, color, UiStroke::NONE));
+        }
+        Brush::Liquify => {
+            for offset in [-5.0, 0.0, 5.0] {
+                let points = (0..=24)
+                    .map(|i| {
+                        let t = i as f32 / 24.0;
+                        Pos2::new(
+                            c.x - 11.0 + t * 22.0,
+                            c.y + offset + (t * std::f32::consts::TAU).sin() * 2.8,
+                        )
+                    })
+                    .collect();
+                p.add(PathShape::line(points, UiStroke::new(1.4_f32, color)));
+            }
+        }
+    }
+}
 fn diamond(p: &egui::Painter, c: Pos2, r: f32, color: Color32) {
     p.add(egui::Shape::convex_polygon(
         vec![
@@ -273,28 +333,15 @@ impl Studio {
     }
     pub(super) fn canvas_page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let workspace = ui.max_rect();
-        let response = ui.allocate_rect(workspace, Sense::click_and_drag());
-        if response.hovered() {
-            let factor = ctx.input(|i| i.zoom_delta());
-            let scroll = ctx.input(|i| i.smooth_scroll_delta);
-            let wheel = if ctx.input(|i| i.modifiers.command) {
-                (scroll.y * 0.002).exp()
-            } else {
-                1.0
-            };
-            self.canvas_zoom = (self.canvas_zoom * factor * wheel).clamp(0.2, 8.0);
-            if ctx.input(|i| i.pointer.middle_down()) {
-                self.canvas_pan += ctx.input(|i| i.pointer.delta());
-            }
-        }
+        ui.allocate_rect(workspace, Sense::click_and_drag());
         let width = workspace
             .width()
-            .min(workspace.height() * self.doc.settings.aspect)
-            * self.canvas_zoom;
+            .min(workspace.height() * self.doc.settings.aspect);
         let paper = Rect::from_center_size(
-            workspace.center() + self.canvas_pan,
+            workspace.center(),
             Vec2::new(width, width / self.doc.settings.aspect),
         );
+        self.brush_picker(ctx, workspace);
         self.pointer_input(ctx, paper, paper.intersect(workspace));
         let painter = ui.painter().with_clip_rect(workspace);
         painter.add(render::callback(
@@ -305,7 +352,7 @@ impl Studio {
         let pos = ctx
             .input(|i| i.pointer.hover_pos())
             .filter(|p| paper.intersect(workspace).contains(*p));
-        if let Some(pos) = pos {
+        if let Some(pos) = pos.filter(|_| self.brush_wheel.is_none()) {
             ctx.set_cursor_icon(egui::CursorIcon::None);
             self.cursor(
                 &painter,
@@ -320,17 +367,118 @@ impl Studio {
             );
         }
     }
+    fn brush_picker(&mut self, ctx: &egui::Context, workspace: Rect) {
+        let events = ctx.input(|i| i.events.clone());
+        for event in events {
+            if matches!(
+                event,
+                egui::Event::WindowFocused(false)
+                    | egui::Event::Key {
+                        key: Key::Escape,
+                        pressed: true,
+                        ..
+                    }
+            ) {
+                self.brush_wheel = None;
+            }
+            if let egui::Event::PointerButton {
+                pos,
+                button: PointerButton::Secondary,
+                pressed,
+                ..
+            } = event
+            {
+                if pressed && workspace.contains(pos) && self.drawing.is_none() {
+                    self.brush_wheel = Some(pos);
+                }
+                if !pressed {
+                    if let Some(center) = self.brush_wheel.take() {
+                        if let Some(brush) = wheel_choice(center, pos) {
+                            self.tool = brush;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(center) = self.brush_wheel {
+            ctx.set_cursor_icon(egui::CursorIcon::Default);
+            let selected = ctx
+                .input(|i| i.pointer.latest_pos())
+                .and_then(|p| wheel_choice(center, p))
+                .unwrap_or(self.tool);
+            let p = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                Id::new("brush_wheel"),
+            ));
+            p.circle_filled(center, 82.0, PANEL);
+            p.circle_stroke(center, 82.0, UiStroke::new(1.0_f32, LINE));
+            for (brush, angle) in wheel_directions() {
+                let mut points = vec![center];
+                for i in 0..=32 {
+                    let a = angle - std::f32::consts::PI / 3.0
+                        + i as f32 / 32.0 * std::f32::consts::TAU / 3.0;
+                    points.push(center + Vec2::angled(a) * 80.0);
+                }
+                p.add(egui::Shape::convex_polygon(
+                    points,
+                    if brush == selected {
+                        Color32::from_rgb(51, 59, 76)
+                    } else {
+                        PANEL
+                    },
+                    UiStroke::NONE,
+                ));
+                brush_icon(
+                    &p,
+                    center + Vec2::angled(angle) * 49.0,
+                    brush,
+                    if brush == selected { INK } else { MUTED },
+                );
+            }
+            p.circle_filled(center, 15.0, PANEL);
+            p.circle_stroke(center, 15.0, UiStroke::new(1.0_f32, LINE));
+        }
+    }
     fn cursor(&self, p: &egui::Painter, pos: Pos2, r: f32) {
-        p.circle_stroke(
-            pos,
-            r.max(1.5),
-            UiStroke::new(2.5_f32, Color32::from_white_alpha(150)),
-        );
-        p.circle_stroke(
-            pos,
-            r.max(1.5),
-            UiStroke::new(0.8_f32, Color32::from_gray(64)),
-        );
+        if self.tool == Tool::Marker {
+            let angle = self.tablet.angle().map_or(0.0, |a| {
+                if self.mirror {
+                    std::f32::consts::PI - a
+                } else {
+                    a
+                }
+            });
+            let corners = marker_corners(
+                Point {
+                    x: pos.x,
+                    y: pos.y,
+                    pressure: 1.0,
+                    angle,
+                },
+                r * 2.0,
+            )
+            .map(|p| Pos2::new(p[0], p[1]))
+            .to_vec();
+            p.add(PathShape::closed_line(
+                corners.clone(),
+                UiStroke::new(2.5_f32, Color32::from_white_alpha(150)),
+            ));
+            p.add(PathShape::closed_line(
+                corners,
+                UiStroke::new(0.8_f32, Color32::from_gray(64)),
+            ));
+        } else {
+            p.circle_stroke(
+                pos,
+                r.max(1.5),
+                UiStroke::new(2.5_f32, Color32::from_white_alpha(150)),
+            );
+            p.circle_stroke(
+                pos,
+                r.max(1.5),
+                UiStroke::new(0.8_f32, Color32::from_gray(64)),
+            );
+        }
         if self.tool == Tool::Liquify {
             p.circle_filled(pos, 1.2, Color32::from_gray(90));
         }
@@ -379,7 +527,11 @@ impl Studio {
         );
         let duration = self.doc.timing.duration;
         let span = duration / self.timeline_zoom as f64;
-        if response.hovered() {
+        if ctx.input(|i| {
+            i.pointer
+                .hover_pos()
+                .is_some_and(|p| Rect::from_min_max(tracks.min, rect.max).contains(p))
+        }) {
             let delta = ctx.input(|i| i.smooth_scroll_delta);
             let pinch = ctx.input(|i| i.zoom_delta());
             let zoom = if ctx.input(|i| i.modifiers.command || i.modifiers.ctrl) {
@@ -419,20 +571,50 @@ impl Studio {
                 * self.doc.timing.tempos[segment].bpm
                 / 60.0;
             let major = (beat - beat.round()).abs() < 0.0001;
+            let meter = self.doc.timing.tempos[segment];
+            let bar = major
+                && (beat / meter.beats as f64 - (beat / meter.beats as f64).round()).abs() < 0.0001;
+            let group = bar
+                && (beat / (meter.beats * meter.bars) as f64
+                    - (beat / (meter.beats * meter.bars) as f64).round())
+                .abs()
+                    < 0.0001;
             let px = x(time);
             if major {
                 label(
                     &p,
                     Pos2::new(px + 1.0, ruler.top() + 3.0),
                     Align2::LEFT_TOP,
-                    format!("{time:.2}"),
+                    if bar {
+                        format!("{}", (beat / meter.beats as f64).round() as u64 + 1)
+                    } else {
+                        format!("{}", beat.round() as u64 % meter.beats as u64 + 1)
+                    },
                     10.0,
-                    MUTED,
+                    if group {
+                        INK
+                    } else if bar {
+                        ACCENT
+                    } else {
+                        MUTED
+                    },
                 );
             }
             p.line_segment(
                 [
-                    Pos2::new(px, ruler.bottom() - if major { 6.0 } else { 3.0 }),
+                    Pos2::new(
+                        px,
+                        ruler.bottom()
+                            - if group {
+                                12.0
+                            } else if bar {
+                                9.0
+                            } else if major {
+                                6.0
+                            } else {
+                                3.0
+                            },
+                    ),
                     Pos2::new(px, ruler.bottom()),
                 ],
                 UiStroke::new(1.0_f32, LINE),
@@ -441,7 +623,16 @@ impl Studio {
                 p.vline(
                     px,
                     rows.y_range(),
-                    UiStroke::new(1.0_f32, Color32::from_rgb(26, 28, 32)),
+                    UiStroke::new(
+                        1.0_f32,
+                        if group {
+                            Color32::from_rgb(55, 62, 78)
+                        } else if bar {
+                            Color32::from_rgb(40, 46, 58)
+                        } else {
+                            Color32::from_rgb(26, 28, 32)
+                        },
+                    ),
                 );
             }
         }
@@ -479,13 +670,47 @@ impl Studio {
                 );
             }
         } else {
-            p.hline(
-                wave.x_range(),
-                wave.center().y,
-                UiStroke::new(1.0_f32, LINE),
+            let hovered =
+                ctx.input(|i| i.pointer.hover_pos().is_some_and(|pos| wave.contains(pos)));
+            let dragging = ctx.input(|i| !i.raw.hovered_files.is_empty());
+            p.rect_filled(
+                wave,
+                6.0,
+                if hovered || dragging {
+                    Color32::from_rgb(30, 36, 48)
+                } else {
+                    Color32::from_rgb(22, 25, 31)
+                },
+            );
+            p.rect_stroke(
+                wave,
+                6.0,
+                UiStroke::new(1.0_f32, if hovered || dragging { ACCENT } else { LINE }),
+                egui::StrokeKind::Inside,
+            );
+            label(
+                &p,
+                wave.center(),
+                Align2::CENTER_CENTER,
+                "Import audio",
+                12.0,
+                if hovered || dragging { INK } else { MUTED },
             );
         }
-        let wave_response = ui.interact(wave, Id::new("wave_context"), Sense::click());
+        let wave_response = ui
+            .interact(wave, Id::new("wave_context"), Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if self.background.is_none() {
+            let dropped = ctx.input(|i| {
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .find_map(|file| file.path.clone())
+            });
+            if let Some(path) = dropped {
+                self.import_audio_path(path);
+            }
+        }
         wave_response.context_menu(|ui| {
             menu_surface(ui);
             if ui
@@ -532,7 +757,7 @@ impl Studio {
                 continue;
             }
             let px = x(t.start);
-            let marker = Rect::from_min_size(Pos2::new(px, tempo.top()), Vec2::new(92.0, 26.0));
+            let marker = Rect::from_min_size(Pos2::new(px, tempo.top()), Vec2::new(140.0, 26.0));
             diamond(&p, Pos2::new(px + 4.0, marker.center().y), 3.0, ACCENT);
             let marker_response =
                 ui.interact(marker, Id::new(("tempo", i)), Sense::click_and_drag());
@@ -540,7 +765,7 @@ impl Studio {
                 &p,
                 Pos2::new(px + 15.0, marker.center().y),
                 Align2::LEFT_CENTER,
-                format!("{:.0}", t.bpm),
+                format!("{:.0}   {} × {}", t.bpm, t.bars, t.beats),
                 11.0,
                 ACCENT,
             );
@@ -568,6 +793,21 @@ impl Studio {
                             .suffix(" BPM"),
                     )
                     .changed();
+                menu_row(ui, "Bars / group", |ui| {
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut self.doc.timing.tempos[i].bars).range(1..=32),
+                        )
+                        .changed();
+                });
+                menu_row(ui, "Beats / bar", |ui| {
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut self.doc.timing.tempos[i].beats)
+                                .range(1..=32),
+                        )
+                        .changed();
+                });
                 if i > 0 {
                     changed |= ui
                         .add(
@@ -613,17 +853,7 @@ impl Studio {
             }
         }
         if let Some(time) = add_tempo {
-            if !self
-                .doc
-                .timing
-                .tempos
-                .iter()
-                .any(|t| (t.start - time).abs() < 0.000001)
-            {
-                let bpm = self.doc.timing.tempos[self.doc.timing.segment(time)].bpm;
-                self.doc.timing.tempos.push(Tempo { start: time, bpm });
-                changed = true;
-            }
+            changed |= self.doc.timing.add_start(time);
         }
         if changed {
             self.doc.timing.normalize();
@@ -632,7 +862,8 @@ impl Studio {
         }
         self.ui_change(&before, changed, ctx);
         self.layer_tracks(ui, ctx, &p, rect, rows, tracks, start, span);
-        if (response.clicked() || response.dragged_by(PointerButton::Primary))
+        if self.frame_drag.is_none()
+            && (response.clicked() || response.dragged_by(PointerButton::Primary))
             && !wave.contains(response.interact_pointer_pos().unwrap_or(Pos2::ZERO))
             && !tempo.contains(response.interact_pointer_pos().unwrap_or(Pos2::ZERO))
         {
@@ -754,6 +985,21 @@ impl Studio {
                     if selected { ACCENT } else { MUTED },
                 );
             }
+            if let Some((layer, _, to)) = self.frame_drag {
+                if layer == i {
+                    let px = x(seconds(to));
+                    let end = x(self.doc.timing.next(seconds(to))).max(px + 12.0);
+                    p.rect_stroke(
+                        Rect::from_min_max(
+                            Pos2::new(px, y + 10.0),
+                            Pos2::new(end, y + HEIGHT - 10.0),
+                        ),
+                        3.0,
+                        UiStroke::new(1.5_f32, ACCENT),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+            }
             let label_response = ui.interact(
                 Rect::from_min_max(
                     Pos2::new(rect.left(), y),
@@ -763,17 +1009,28 @@ impl Studio {
                 Id::new(("layer", i)),
                 Sense::click_and_drag(),
             );
+            if label_response.hovered() {
+                let h = p.with_clip_rect(rows);
+                h.line_segment(
+                    [
+                        Pos2::new(rect.left() + 5.0, y + 18.0),
+                        Pos2::new(rect.left() + 5.0, y + HEIGHT - 18.0),
+                    ],
+                    UiStroke::new(1.5_f32, ACCENT),
+                );
+                ctx.set_cursor_icon(egui::CursorIcon::Grab);
+            }
             if label_response.clicked() || label_response.drag_started() {
                 self.layer = i;
             }
-            if i > 0 && label_response.drag_stopped() {
+            if label_response.drag_stopped() {
                 if let Some(pos) = label_response.interact_pointer_pos() {
                     let target = (self.doc.layers.len() as isize
                         - 1
                         - ((pos.y - rows.top() + self.layer_scroll) / HEIGHT).floor() as isize)
-                        .clamp(1, self.doc.layers.len().saturating_sub(1) as isize)
+                        .clamp(0, self.doc.layers.len().saturating_sub(1) as isize)
                         as usize;
-                    if i > 0 && target != i {
+                    if target != i {
                         reorder = Some((i, target));
                     }
                 }
@@ -784,8 +1041,50 @@ impl Studio {
                     rows.max,
                 )),
                 Id::new(("exposure_row", i)),
-                Sense::click(),
+                Sense::click_and_drag(),
             );
+            if context.drag_started() {
+                let origin = ctx
+                    .input(|input| input.pointer.press_origin())
+                    .or_else(|| context.interact_pointer_pos());
+                if let Some(pos) = origin {
+                    let time = start
+                        + ((pos.x - tracks.left()) / tracks.width()).clamp(0.0, 1.0) as f64 * span;
+                    if let Some((&from, _)) =
+                        self.doc.layers[i].cels.range(..=tick(time)).next_back()
+                    {
+                        self.frame_drag = Some((i, from, from));
+                        self.layer = i;
+                        self.transport.stop();
+                    }
+                }
+            }
+            if context.dragged() {
+                if let Some((layer, from, _)) = self.frame_drag {
+                    if layer == i {
+                        if let Some(pos) = context.interact_pointer_pos() {
+                            let time = start
+                                + ((pos.x - tracks.left()) / tracks.width()).clamp(0.0, 1.0) as f64
+                                    * span;
+                            let to = tick(self.doc.timing.snap(time));
+                            self.frame_drag = Some((i, from, to));
+                            self.time = seconds(to);
+                            ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+                        }
+                    }
+                }
+            }
+            if context.drag_stopped() {
+                if let Some((layer, from, to)) = self.frame_drag.take() {
+                    if layer == i && from != to {
+                        changed |= self.doc.move_exposure(i, from, to);
+                        self.time = seconds(to);
+                    }
+                }
+            }
+            if context.hovered() {
+                ctx.set_cursor_icon(egui::CursorIcon::Grab);
+            }
             if context.clicked() {
                 self.layer = i;
                 if let Some(pos) = context.interact_pointer_pos() {
@@ -799,6 +1098,7 @@ impl Studio {
             for response in [&label_response, &context] {
                 response.context_menu(|ui| {
                     menu_surface(ui);
+                    let can_delete = self.doc.layers.len() > 1;
                     let layer = &mut self.doc.layers[i];
                     changed |= ui
                         .add(
@@ -811,7 +1111,7 @@ impl Studio {
                     ui.add_space(5.0);
                     ui.separator();
                     ui.add_space(3.0);
-                    if i > 0 {
+                    {
                         menu_row(ui, "Blend", |ui| {
                             egui::ComboBox::from_id_salt(("blend", i))
                                 .width(124.0)
@@ -882,7 +1182,7 @@ impl Studio {
                         changed = true;
                         ui.close_menu();
                     }
-                    if i > 0
+                    if can_delete
                         && ui
                             .button(
                                 RichText::new("Delete layer")
@@ -895,6 +1195,9 @@ impl Studio {
                     }
                 });
             }
+        }
+        if ctx.input(|i| i.key_pressed(Key::Escape) || !i.focused) {
+            self.frame_drag = None;
         }
         if let Some((from, to)) = reorder {
             let layer = self.doc.layers.remove(from);
@@ -919,6 +1222,17 @@ impl Studio {
     }
     fn ui_change(&mut self, before: &Document, changed: bool, ctx: &egui::Context) {
         if changed {
+            if before.timing != self.doc.timing {
+                let source = self.timing_origin.get_or_insert_with(|| before.clone());
+                // A continuous BPM edit always regrids the original exposures, preventing
+                // cumulative drift/collisions while dragging a value through many samples.
+                for (layer, original) in self.doc.layers.iter_mut().zip(&source.layers) {
+                    layer.cels = original.cels.clone();
+                }
+                self.doc.snap_exposures();
+                self.time = self.doc.timing.snap(self.time);
+                self.transport.stop();
+            }
             if !self.ui_editing {
                 self.history.record(before);
             }
@@ -1067,6 +1381,9 @@ impl Studio {
                             row(ui, "Default grid · beats", |ui| {
                                 step_control(ui, &mut self.preferences.default_step);
                             });
+                            group(ui,"Rhythm watermark");
+                            row(ui,"This project",|ui|{local_changed|=toggle(ui,&mut self.doc.settings.watermark).changed();});
+                            row(ui,"New projects",|ui|{toggle(ui,&mut self.preferences.default_watermark);});
                         }
                         1 => {
                             row(ui, "Pressure curve", |ui| {
@@ -1141,16 +1458,9 @@ impl Studio {
                             });
                             group(ui, "New layer sizes");
                             row(ui, "", |ui| {
-                                ui.add_sized(
-                                    [100.0, 24.0],
-                                    egui::Label::new(
-                                        RichText::new("Liquify").color(MUTED).size(11.0),
-                                    ),
-                                );
-                                ui.add_sized(
-                                    [100.0, 24.0],
-                                    egui::Label::new(RichText::new("Ink").color(MUTED).size(11.0)),
-                                );
+                                ui.add_sized([72.0,24.0],egui::Label::new(RichText::new("Liquify").color(MUTED).size(11.0)));
+                                ui.add_sized([72.0,24.0],egui::Label::new(RichText::new("Marker").color(MUTED).size(11.0)));
+                                ui.add_sized([72.0,24.0],egui::Label::new(RichText::new("Round").color(MUTED).size(11.0)));
                             });
                             for blend in [
                                 Blend::Base,
@@ -1160,18 +1470,19 @@ impl Studio {
                                 Blend::Move,
                                 Blend::Blur,
                             ] {
-                                row(ui, blend.name(), |ui| {
+                                row(ui, if blend==Blend::Base{"First layer"}else{blend.name()}, |ui| {
                                     let defaults = &mut self.preferences.brush_defaults
                                         [blend.shader_id() as usize];
                                     ui.add_sized(
-                                        [100.0, 30.0],
+                                        [72.0, 30.0],
                                         egui::DragValue::new(&mut defaults.liquify)
                                             .range(1.0..=1920.0)
                                             .speed(1.0)
                                             .suffix(" px"),
                                     );
+                                    ui.add_sized([72.0,30.0],egui::DragValue::new(&mut defaults.marker).range(1.0..=1920.0).speed(1.0).suffix(" px"));
                                     ui.add_sized(
-                                        [100.0, 30.0],
+                                        [72.0, 30.0],
                                         egui::DragValue::new(&mut defaults.ink)
                                             .range(1.0..=1920.0)
                                             .speed(1.0)

@@ -24,6 +24,29 @@ pub struct Point {
     pub x: f32,
     pub y: f32,
     pub pressure: f32,
+    #[serde(default)]
+    pub angle: f32,
+}
+pub fn interpolate_angle(start: f32, end: f32, t: f32) -> f32 {
+    let delta = (end - start + std::f32::consts::FRAC_PI_2).rem_euclid(std::f32::consts::PI)
+        - std::f32::consts::FRAC_PI_2;
+    if t == 1.0 {
+        end
+    } else {
+        start + delta * t
+    }
+}
+pub fn marker_corners(point: Point, width: f32) -> [[f32; 2]; 4] {
+    let half = width * point.pressure * 0.5;
+    let (s, c) = point.angle.sin_cos();
+    let s = if s.abs() < 1e-6 { 0.0 } else { s };
+    let c = if c.abs() < 1e-6 { 0.0 } else { c };
+    [[-1.0, -0.25], [1.0, -0.25], [1.0, 0.25], [-1.0, 0.25]].map(|[x, y]| {
+        [
+            point.x + half * (x * c - y * s),
+            point.y + half * (x * s + y * c),
+        ]
+    })
 }
 impl Point {
     pub fn distance(self, other: Self) -> f32 {
@@ -34,6 +57,8 @@ impl Point {
 pub struct Stroke {
     pub id: u64,
     pub width: f32,
+    #[serde(default)]
+    pub brush: Brush,
     pub points: Vec<Point>,
     #[serde(skip)]
     pub revision: u64,
@@ -45,6 +70,7 @@ impl Stroke {
         Self {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             width,
+            brush: Brush::Ink,
             points: vec![point],
             revision: 0,
             geometry_edits: Vec::new(),
@@ -164,10 +190,15 @@ impl Style {
         }
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Brush {
+    #[default]
     Ink,
+    Marker,
     Liquify,
+}
+fn default_marker_width() -> f32 {
+    42.0
 }
 fn default_liquify_width() -> f32 {
     240.0
@@ -182,6 +213,8 @@ pub struct Layer {
     pub width: f32,
     #[serde(default = "default_liquify_width")]
     pub liquify_width: f32,
+    #[serde(default = "default_marker_width")]
+    pub marker_width: f32,
     pub strength: f32,
     pub cels: BTreeMap<Tick, Arc<Cel>>,
 }
@@ -195,6 +228,7 @@ impl Layer {
             visible: true,
             width,
             liquify_width: default_liquify_width(),
+            marker_width: default_marker_width(),
             strength: 1.0,
             cels: BTreeMap::new(),
         }
@@ -202,12 +236,14 @@ impl Layer {
     pub fn brush_width(&self, brush: Brush) -> f32 {
         match brush {
             Brush::Ink => self.width,
+            Brush::Marker => self.marker_width,
             Brush::Liquify => self.liquify_width,
         }
     }
     pub fn brush_width_mut(&mut self, brush: Brush) -> &mut f32 {
         match brush {
             Brush::Ink => &mut self.width,
+            Brush::Marker => &mut self.marker_width,
             Brush::Liquify => &mut self.liquify_width,
         }
     }
@@ -226,12 +262,38 @@ impl Layer {
         Arc::make_mut(self.cels.get_mut(&time).unwrap())
     }
 }
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Tempo {
     pub start: f64,
     pub bpm: f64,
+    #[serde(default = "default_bars")]
+    pub bars: u32,
+    #[serde(default = "default_beats")]
+    pub beats: u32,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+fn default_bars() -> u32 {
+    2
+}
+fn default_beats() -> u32 {
+    4
+}
+impl Tempo {
+    pub fn at(start: f64, bpm: f64) -> Self {
+        Self {
+            start,
+            bpm,
+            bars: 2,
+            beats: 4,
+        }
+    }
+    pub fn progress(self, time: f64) -> u32 {
+        let count = self.bars * self.beats;
+        (((time - self.start).max(0.0) * self.bpm / 60.0 + 1e-7).floor() as u64 % count as u64)
+            as u32
+            + 1
+    }
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Timing {
     pub tempos: Vec<Tempo>,
     pub step: f64,
@@ -240,10 +302,7 @@ pub struct Timing {
 impl Default for Timing {
     fn default() -> Self {
         Self {
-            tempos: vec![Tempo {
-                start: 0.0,
-                bpm: 120.0,
-            }],
+            tempos: vec![Tempo::at(0.0, 120.0)],
             step: 0.125,
             duration: 8.0,
         }
@@ -257,6 +316,18 @@ impl Timing {
     }
     pub fn step_at(&self, index: usize) -> f64 {
         60.0 / self.tempos[index].bpm * self.step
+    }
+    pub fn add_start(&mut self, time: f64) -> bool {
+        if self.tempos.iter().any(|t| (t.start - time).abs() < 1e-6) {
+            return false;
+        }
+        let prior = self.tempos[self.segment(time)];
+        self.tempos.push(Tempo {
+            start: time,
+            ..prior
+        });
+        self.normalize();
+        true
     }
     pub fn normalize(&mut self) {
         self.tempos.sort_by(|a, b| a.start.total_cmp(&b.start));
@@ -366,8 +437,8 @@ impl Default for Onion {
     fn default() -> Self {
         Self {
             enabled: true,
-            previous: 1,
-            next: 1,
+            previous: 3,
+            next: 3,
             opacity: 0.22,
             before: [90, 130, 180],
             after: [209, 123, 94],
@@ -423,7 +494,6 @@ pub fn default_bindings() -> Vec<Binding> {
         ("New", "N", true, false, false),
         ("Undo", "Z", false, false, false),
         ("Redo", "Y", false, false, false),
-        ("Liquify", "L", false, false, false),
         ("Mirror", "M", false, false, false),
         ("Previous", "A", false, false, false),
         ("Next", "D", false, false, false),
@@ -434,7 +504,6 @@ pub fn default_bindings() -> Vec<Binding> {
         ("Play", "Space", false, false, false),
         ("Onion skin", "O", false, false, false),
         ("Fullscreen", "F", false, false, false),
-        ("Fit", "0", false, false, false),
         ("Import music", "I", true, false, false),
         ("Export", "E", true, false, false),
         ("Save as", "S", true, false, true),
@@ -487,16 +556,22 @@ impl Default for ExportSettings {
         }
     }
 }
+fn default_watermark() -> bool {
+    true
+}
 /// Only composition data lives in an archive. Application preferences are independent.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
     pub aspect: f32,
+    #[serde(default = "default_watermark")]
+    pub watermark: bool,
     pub export: ExportSettings,
 }
 impl Default for Settings {
     fn default() -> Self {
         Self {
             aspect: 2.39,
+            watermark: true,
             export: ExportSettings::default(),
         }
     }
@@ -522,7 +597,7 @@ impl Default for Document {
             version: 1,
             name: "Untitled motion".into(),
             layers: vec![
-                Layer::new("Paper", Blend::Base, 6.0),
+                Layer::new("Paper", Blend::Xor, 6.0),
                 Layer::new("Ink", Blend::Xor, 42.0),
                 Layer::new("Movement", Blend::Move, 100.0),
                 Layer::new("Atmosphere", Blend::Blur, 140.0),
@@ -534,15 +609,53 @@ impl Default for Document {
     }
 }
 impl Document {
+    /// Nearest-grid snapping preserves chronology; collisions advance one grid unit
+    /// at a time so every exposure survives independently.
+    pub fn snap_exposures(&mut self) {
+        let mut last_frame = 0.0_f64;
+        let original_duration = self.timing.duration;
+        for layer in &mut self.layers {
+            let mut previous = None;
+            let old = std::mem::take(&mut layer.cels);
+            for (time, cel) in old {
+                let mut dest = tick(self.timing.snap(seconds(time)));
+                if let Some(last) = previous {
+                    if dest <= last {
+                        dest = tick(self.timing.next(seconds(last)));
+                    }
+                }
+                previous = Some(dest);
+                last_frame = last_frame.max(seconds(dest));
+                layer.cels.insert(dest, cel);
+            }
+        }
+        if last_frame >= self.timing.duration {
+            self.timing.duration = self.timing.next(last_frame);
+            if (self.settings.export.end - original_duration).abs() < 1e-6 {
+                self.settings.export.end = self.timing.duration;
+            }
+        }
+    }
+    pub fn move_exposure(&mut self, layer: usize, from: Tick, to: Tick) -> bool {
+        let to = tick(self.timing.snap(seconds(to)));
+        if from == to {
+            return false;
+        }
+        let cels = &mut self.layers[layer].cels;
+        let Some(cel) = cels.remove(&from) else {
+            return false;
+        };
+        if let Some(occupied) = cels.insert(to, cel) {
+            cels.insert(from, occupied);
+        }
+        true
+    }
     pub fn validate(&self) -> Result<(), String> {
         if self.version != 1 {
             return Err("Unsupported project version".into());
         }
-        if self.layers.is_empty()
-            || self.layers[0].blend != Blend::Base
-            || self.layers.iter().skip(1).any(|l| l.blend == Blend::Base)
-        {
-            return Err("Invalid base layer".into());
+        if self.layers.is_empty() {
+            return Err("A project needs at least one drawing layer".into());
         }
         if !self.settings.aspect.is_finite() || self.settings.aspect <= 0.0 {
             return Err("Invalid canvas ratio".into());
@@ -550,7 +663,14 @@ impl Document {
         if self.timing.tempos.is_empty()
             || self.timing.tempos[0].start != 0.0
             || self.timing.tempos.iter().any(|t| {
-                !t.start.is_finite() || t.start < 0.0 || !t.bpm.is_finite() || t.bpm <= 0.0
+                !t.start.is_finite()
+                    || t.start < 0.0
+                    || !t.bpm.is_finite()
+                    || t.bpm <= 0.0
+                    || t.bars == 0
+                    || t.beats == 0
+                    || t.bars > 32
+                    || t.beats > 32
             })
             || self
                 .timing
@@ -577,6 +697,8 @@ impl Document {
         for l in &self.layers {
             if !l.width.is_finite()
                 || l.width <= 0.0
+                || !l.marker_width.is_finite()
+                || l.marker_width <= 0.0
                 || !l.liquify_width.is_finite()
                 || l.liquify_width <= 0.0
                 || !l.strength.is_finite()
@@ -589,7 +711,8 @@ impl Document {
                         || stroke.width <= 0.0
                         || stroke.points.is_empty()
                         || stroke.points.iter().any(|p| {
-                            !p.x.is_finite()
+                            !p.angle.is_finite()
+                                || !p.x.is_finite()
                                 || !p.y.is_finite()
                                 || !p.pressure.is_finite()
                                 || p.pressure < 0.0
@@ -607,6 +730,14 @@ impl Document {
     pub fn scene(&self, time: Tick) -> Scene {
         Scene {
             aspect: self.settings.aspect,
+            rhythm: self.settings.watermark.then(|| {
+                let t = self.timing.tempos[self.timing.segment(seconds(time))];
+                Rhythm {
+                    rows: t.bars,
+                    cols: t.beats,
+                    filled: t.progress(seconds(time)),
+                }
+            }),
             layers: self
                 .layers
                 .iter()
@@ -622,8 +753,15 @@ impl Document {
         }
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rhythm {
+    pub rows: u32,
+    pub cols: u32,
+    pub filled: u32,
+}
 #[derive(Clone)]
 pub struct Scene {
+    pub rhythm: Option<Rhythm>,
     pub aspect: f32,
     pub layers: Vec<SceneLayer>,
 }
@@ -700,11 +838,13 @@ impl SpatialIndex {
         strength: f32,
     ) {
         let lo = self.key(Point {
+            angle: 0.0,
             x: center.x - radius,
             y: center.y - radius,
             pressure: 1.0,
         });
         let hi = self.key(Point {
+            angle: 0.0,
             x: center.x + radius,
             y: center.y + radius,
             pressure: 1.0,
@@ -745,6 +885,7 @@ mod tests {
     use super::*;
     fn p(x: f32, y: f32) -> Point {
         Point {
+            angle: 0.0,
             x,
             y,
             pressure: 0.7,
@@ -755,10 +896,14 @@ mod tests {
         let t = Timing {
             tempos: vec![
                 Tempo {
+                    bars: 2,
+                    beats: 4,
                     start: 0.0,
                     bpm: 120.0,
                 },
                 Tempo {
+                    bars: 2,
+                    beats: 4,
                     start: 1.03,
                     bpm: 90.0,
                 },
@@ -826,6 +971,7 @@ mod tests {
         let mut stroke = Stroke::new(
             100.0,
             Point {
+                angle: 0.0,
                 x: 10.0,
                 y: 10.0,
                 pressure: 0.05,
@@ -873,5 +1019,161 @@ mod brush_tests {
         json.as_object_mut().unwrap().remove("liquify_width");
         let legacy: Layer = serde_json::from_value(json).unwrap();
         assert_eq!(legacy.liquify_width, 240.0);
+    }
+}
+
+#[cfg(test)]
+mod rhythm_and_exposure_tests {
+    use super::*;
+    fn cel(x: f32) -> Arc<Cel> {
+        Arc::new(Cel {
+            strokes: vec![Arc::new(Stroke::new(
+                10.0,
+                Point {
+                    x,
+                    y: 0.0,
+                    pressure: 1.0,
+                    angle: 0.0,
+                },
+            ))],
+        })
+    }
+    #[test]
+    fn regridding_shifts_collisions_forward_without_merging_or_losing_frames() {
+        let mut doc = Document::default();
+        for (t, x) in [(0.0, 1.0), (0.0625, 2.0), (0.125, 3.0), (0.1875, 4.0)] {
+            doc.layers[0].cels.insert(tick(t), cel(x));
+        }
+        doc.timing.step = 1.0;
+        doc.snap_exposures();
+        let times: Vec<_> = doc.layers[0].cels.keys().map(|t| seconds(*t)).collect();
+        assert_eq!(times, [0.0, 0.5, 1.0, 1.5]);
+        let content: Vec<_> = doc.layers[0]
+            .cels
+            .values()
+            .map(|c| c.strokes[0].points[0].x)
+            .collect();
+        assert_eq!(content, [1.0, 2.0, 3.0, 4.0]);
+        let before = serde_json::to_string(&doc).unwrap();
+        doc.snap_exposures();
+        assert_eq!(serde_json::to_string(&doc).unwrap(), before);
+    }
+    #[test]
+    fn variable_bpm_shifted_anchor_and_tail_exposures_stay_aligned_and_reachable() {
+        let mut doc = Document::default();
+        doc.timing.duration = 1.0;
+        doc.settings.export.end = 1.0;
+        for t in [0.9375, 0.96, 0.97, 0.99] {
+            doc.layers[0].cels.insert(tick(t), cel(t as f32));
+        }
+        doc.timing.tempos.push(Tempo {
+            start: 0.9,
+            bpm: 85.0,
+            bars: 3,
+            beats: 3,
+        });
+        doc.timing.step = 0.5;
+        doc.snap_exposures();
+        assert_eq!(doc.layers[0].cels.len(), 4);
+        for &t in doc.layers[0].cels.keys() {
+            assert_eq!(tick(doc.timing.snap(seconds(t))), t);
+            assert!(seconds(t) < doc.timing.duration);
+        }
+        assert_eq!(doc.settings.export.end, doc.timing.duration);
+    }
+    #[test]
+    fn frame_drag_snaps_and_swaps_occupied_exposures() {
+        let mut doc = Document::default();
+        doc.layers[0].cels.insert(0, cel(1.0));
+        doc.layers[0].cels.insert(tick(0.25), cel(2.0));
+        assert!(doc.move_exposure(0, 0, tick(0.26)));
+        assert_eq!(doc.layers[0].cels[&0].strokes[0].points[0].x, 2.0);
+        assert_eq!(doc.layers[0].cels[&tick(0.25)].strokes[0].points[0].x, 1.0);
+        assert!(!doc.move_exposure(0, tick(0.25), tick(0.26)));
+    }
+    #[test]
+    fn meter_progress_resets_on_group_and_on_tempo_anchor() {
+        let t = Tempo::at(0.0, 120.0);
+        assert_eq!(t.progress(0.0), 1);
+        assert_eq!(t.progress(0.499), 1);
+        assert_eq!(t.progress(0.5), 2);
+        assert_eq!(t.progress(3.999), 8);
+        assert_eq!(t.progress(4.0), 1);
+        let t = Tempo {
+            start: 1.1,
+            bpm: 60.0,
+            bars: 3,
+            beats: 3,
+        };
+        assert_eq!(t.progress(1.1), 1);
+        assert_eq!(t.progress(9.1), 9);
+        assert_eq!(t.progress(10.1), 1);
+    }
+    #[test]
+    fn legacy_points_strokes_and_meter_have_safe_defaults() {
+        let point: Point = serde_json::from_str(r#"{"x":1,"y":2,"pressure":0.8}"#).unwrap();
+        assert_eq!(point.angle, 0.0);
+        let tempo: Tempo = serde_json::from_str(r#"{"start":0,"bpm":120}"#).unwrap();
+        assert_eq!((tempo.bars, tempo.beats), (2, 4));
+        let stroke: Stroke =
+            serde_json::from_str(r#"{"id":1,"width":30,"points":[{"x":1,"y":2,"pressure":0.8}]}"#)
+                .unwrap();
+        assert_eq!(stroke.brush, Brush::Ink);
+    }
+    #[test]
+    fn marker_is_flat_and_follows_tilt_rotation_and_pressure() {
+        let point = Point {
+            x: 0.0,
+            y: 0.0,
+            pressure: 1.0,
+            angle: 0.0,
+        };
+        let points = marker_corners(point, 100.0);
+        assert_eq!(points[0], [-50.0, -12.5]);
+        assert_eq!(points[2], [50.0, 12.5]);
+        let rotated = marker_corners(
+            Point {
+                angle: std::f32::consts::FRAC_PI_2,
+                pressure: 0.5,
+                ..point
+            },
+            100.0,
+        );
+        assert!((rotated[0][0] - 6.25).abs() < 0.001);
+        assert!((rotated[0][1] + 25.0).abs() < 0.001);
+        assert!((interpolate_angle(3.13, 0.01, 0.5) - std::f32::consts::PI).abs() < 0.02);
+    }
+}
+
+#[cfg(test)]
+mod grouping_inheritance_tests {
+    use super::*;
+    #[test]
+    fn new_tempo_starts_inherit_the_previous_bpm_and_grouping() {
+        let mut timing = Timing::default();
+        timing.tempos[0].bars = 3;
+        timing.tempos[0].beats = 5;
+        assert!(timing.add_start(1.5));
+        assert_eq!(
+            (
+                timing.tempos[1].bpm,
+                timing.tempos[1].bars,
+                timing.tempos[1].beats
+            ),
+            (120.0, 3, 5)
+        );
+        timing.tempos[1].bpm = 90.0;
+        timing.tempos[1].bars = 4;
+        timing.tempos[1].beats = 3;
+        assert!(timing.add_start(3.0));
+        assert_eq!(
+            (
+                timing.tempos[2].bpm,
+                timing.tempos[2].bars,
+                timing.tempos[2].beats
+            ),
+            (90.0, 4, 3)
+        );
+        assert!(!timing.add_start(3.0));
     }
 }

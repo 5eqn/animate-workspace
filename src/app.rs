@@ -84,13 +84,14 @@ pub struct Studio {
     busy: Option<String>,
     bind_capture: Option<usize>,
     ui_editing: bool,
+    timing_origin: Option<Document>,
     timeline_zoom: f32,
     timeline_start: f64,
     pending: Option<Pending>,
     allow_close: bool,
     fullscreen: bool,
-    canvas_zoom: f32,
-    canvas_pan: Vec2,
+    brush_wheel: Option<Pos2>,
+    frame_drag: Option<(usize, Tick, Tick)>,
     smoke: Option<PathBuf>,
     smoke_finish: Option<PathBuf>,
     smoke_started: Instant,
@@ -143,13 +144,14 @@ impl Studio {
             busy: None,
             bind_capture: None,
             ui_editing: false,
+            timing_origin: None,
             timeline_zoom: 1.0,
             timeline_start: 0.0,
             pending: None,
             allow_close: false,
             fullscreen: false,
-            canvas_zoom: 1.0,
-            canvas_pan: Vec2::ZERO,
+            brush_wheel: None,
+            frame_drag: None,
             smoke,
             smoke_finish: None,
             smoke_started: Instant::now(),
@@ -189,6 +191,7 @@ impl Studio {
         }
         match action {
             "Canvas" => {
+                self.frame_drag = None;
                 self.page = Page::Canvas;
                 self.return_page = Page::Canvas;
             }
@@ -197,6 +200,8 @@ impl Studio {
                 self.return_page = Page::Timeline;
             }
             "Settings" => {
+                self.frame_drag = None;
+                self.brush_wheel = None;
                 if self.page == Page::Settings {
                     self.page = self.return_page;
                 } else {
@@ -208,10 +213,6 @@ impl Studio {
             "Save as" => self.save(true),
             "Import music" => self.import_audio(),
             "Export" => self.start_export(),
-            "Fit" => {
-                self.canvas_zoom = 1.0;
-                self.canvas_pan = Vec2::ZERO;
-            }
             "Open" => self.request(Pending::Open),
             "New" => self.request(Pending::New),
             "Undo" | "Redo" => {
@@ -229,13 +230,6 @@ impl Studio {
                 } else {
                     self.notify(format!("Nothing to {}", action.to_lowercase()));
                 }
-            }
-            "Liquify" => {
-                self.tool = if self.tool == Tool::Ink {
-                    Tool::Liquify
-                } else {
-                    Tool::Ink
-                };
             }
             "Mirror" => {
                 self.mirror = !self.mirror;
@@ -485,30 +479,36 @@ impl Studio {
             .add_filter("Music", &["wav", "mp3", "flac", "ogg", "m4a", "aac"])
             .pick_file()
         {
-            self.transport.stop();
-            let (tx, rx) = mpsc::channel();
-            self.background = Some(rx);
-            self.busy = Some("Reading music and waveform…".into());
-            std::thread::spawn(move || {
-                let outcome = std::fs::read(&path)
-                    .map_err(|e| e.to_string())
-                    .and_then(|bytes| {
-                        let decoded = DecodedAudio::decode(&bytes)?;
-                        Ok(Background::Imported(
-                            AudioAsset {
-                                name: path
-                                    .file_name()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                                    .into_owned(),
-                                bytes: Arc::new(bytes),
-                            },
-                            decoded,
-                        ))
-                    });
-                let _ = tx.send(outcome.unwrap_or_else(Background::Error));
-            });
+            self.import_audio_path(path);
         }
+    }
+    fn import_audio_path(&mut self, path: PathBuf) {
+        if self.background.is_some() {
+            return;
+        }
+        self.transport.stop();
+        let (tx, rx) = mpsc::channel();
+        self.background = Some(rx);
+        self.busy = Some("Reading music and waveform…".into());
+        std::thread::spawn(move || {
+            let outcome = std::fs::read(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| {
+                    let decoded = DecodedAudio::decode(&bytes)?;
+                    Ok(Background::Imported(
+                        AudioAsset {
+                            name: path
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into_owned(),
+                            bytes: Arc::new(bytes),
+                        },
+                        decoded,
+                    ))
+                });
+            let _ = tx.send(outcome.unwrap_or_else(Background::Error));
+        });
     }
     fn poll_background(&mut self) {
         let result = self.background.as_ref().map(|rx| rx.try_recv());
@@ -577,7 +577,11 @@ impl Studio {
                 .enumerate()
             {
                 ghosts.push(Ghost {
-                    scene: self.doc.scene(*t),
+                    scene: {
+                        let mut scene = self.doc.scene(*t);
+                        scene.rhythm = None;
+                        scene
+                    },
                     color: settings.before,
                     opacity: settings.opacity * settings.falloff.powi(i as i32),
                 });
@@ -591,7 +595,11 @@ impl Studio {
                 .enumerate()
             {
                 ghosts.push(Ghost {
-                    scene: self.doc.scene(*t),
+                    scene: {
+                        let mut scene = self.doc.scene(*t);
+                        scene.rhythm = None;
+                        scene
+                    },
                     color: settings.after,
                     opacity: settings.opacity * settings.falloff.powi(i as i32),
                 });
@@ -608,7 +616,11 @@ impl Studio {
         }
     }
     fn pointer_input(&mut self, ctx: &egui::Context, paper: Rect, visible: Rect) {
-        if self.transport.playing || self.background.is_some() || self.pending.is_some() {
+        if self.transport.playing
+            || self.background.is_some()
+            || self.pending.is_some()
+            || self.brush_wheel.is_some()
+        {
             return;
         }
         let events = ctx.input(|i| i.events.clone());
@@ -662,6 +674,13 @@ impl Studio {
             x = 1920.0 - x;
         }
         Point {
+            angle: self.tablet.angle().map_or(0.0, |a| {
+                if self.mirror {
+                    std::f32::consts::PI - a
+                } else {
+                    a
+                }
+            }),
             x,
             y: (pos.y - paper.top()) / paper.width() * 1920.0,
             pressure: pressure
@@ -684,7 +703,9 @@ impl Studio {
             if movement {
                 cel.strokes.clear();
             }
-            cel.strokes.push(Arc::new(Stroke::new(width, point)));
+            let mut stroke = Stroke::new(width, point);
+            stroke.brush = self.tool;
+            cel.strokes.push(Arc::new(stroke));
             None
         };
         self.drawing = Some(Drawing {
@@ -719,6 +740,16 @@ impl Studio {
                 );
                 if let Some(stroke) = cel.strokes.last_mut() {
                     let stroke = Arc::make_mut(stroke);
+                    if stroke.brush == Brush::Marker
+                        && interpolate_angle(stroke.points.last().unwrap().angle, point.angle, 0.5)
+                            != stroke.points.last().unwrap().angle
+                    {
+                        stroke.points.last_mut().unwrap().angle = point.angle;
+                        stroke.invalidate_from(stroke.points.len() - 1);
+                        if let Some(smoother) = &mut drawing.smoother {
+                            smoother.stationary_angle(point.angle);
+                        }
+                    }
                     if let Some(smoother) = &mut drawing.smoother {
                         smoother.stationary_pressure(point.pressure);
                     }
@@ -743,6 +774,7 @@ impl Studio {
             for i in 0..steps {
                 let t = (i + 1) as f32 / steps as f32;
                 let center = Point {
+                    angle: 0.0,
                     x: drawing.last.x + delta[0] * t,
                     y: drawing.last.y + delta[1] * t,
                     pressure: point.pressure,
@@ -773,6 +805,7 @@ impl Studio {
                 for i in 1..=steps {
                     let t = i as f32 / steps as f32;
                     stroke.points.push(Point {
+                        angle: interpolate_angle(start.angle, point.angle, t),
                         x: start.x + delta[0] * t,
                         y: start.y + delta[1] * t,
                         pressure: start.pressure + (point.pressure - start.pressure) * t,
@@ -911,6 +944,7 @@ impl Studio {
                 let mut stroke = Stroke::new(
                     3.5 + ring as f32,
                     Point {
+                        angle: 0.0,
                         x: 0.0,
                         y: 0.0,
                         pressure: 1.0,
@@ -922,6 +956,7 @@ impl Studio {
                     let r = 180.0 + ring as f32 * 21.0;
                     let wobble = (t * 3.0 + phase).sin() * 23.0;
                     stroke.points.push(Point {
+                        angle: 0.0,
                         x: 960.0 + (t + phase * 0.12).cos() * (r + wobble) * 1.35,
                         y: 400.0 + t.sin() * (r + wobble) * 0.9,
                         pressure: 0.4 + (t + phase).sin().abs() * 0.6,
@@ -932,6 +967,7 @@ impl Studio {
             for star in 0..7 {
                 let t = star as f32 / 7.0 * std::f32::consts::TAU + phase * 0.2;
                 let p = Point {
+                    angle: 0.0,
                     x: 960.0 + t.cos() * 440.0,
                     y: 400.0 + t.sin() * 255.0,
                     pressure: 1.0,
@@ -983,12 +1019,14 @@ impl Studio {
                     let mut stroke = Stroke::new(
                         100.0,
                         Point {
+                            angle: 0.0,
                             x: 800.0,
                             y: 400.0,
                             pressure: 1.0,
                         },
                     );
                     stroke.points.push(Point {
+                        angle: 0.0,
                         x: 1040.0,
                         y: 450.0,
                         pressure: 1.0,
@@ -1019,10 +1057,194 @@ impl Studio {
                 std::fs::write(directory.join(format!("{name}.ppm")), ppm).unwrap();
                 outputs.push(format!("{name}: {black} non-white pixels"));
             }
+            // Exact integer-aligned rhythm cells, including group reset and project switch.
+            let mut rhythm_doc = Document::default();
+            for (time, filled) in [(0.0, 1), (0.5, 2), (2.0, 5), (3.5, 8), (4.0, 1)] {
+                let pixels =
+                    unsafe { renderer.read_frame(gl, &rhythm_doc.scene(tick(time)), [1920, 804]) }
+                        .unwrap();
+                for row in 0..2 {
+                    for col in 0..4 {
+                        for y in 0..5 {
+                            for x in 0..5 {
+                                let px = 1870 + col * 7 + x;
+                                let py = 24 + (1 - row) * 7 + y;
+                                let i = (py * 1920 + px) * 4;
+                                let expected = if row * 4 + col < filled { 0 } else { 204 };
+                                assert_eq!(
+                                    &pixels[i..i + 3],
+                                    &[expected; 3],
+                                    "Rhythm cells are not pixel aligned or have wrong beat state"
+                                );
+                            }
+                        }
+                    }
+                }
+                let gap = (26 * 1920 + 1875) * 4;
+                assert_eq!(
+                    &pixels[gap..gap + 3],
+                    &[255; 3],
+                    "Rhythm grid gap is not pixel-perfect"
+                );
+            }
+            let mut effect = Layer::new("Watermark move", Blend::Move, 100.0);
+            let mut motion = Stroke::new(
+                100.0,
+                Point {
+                    x: 0.0,
+                    y: 0.0,
+                    pressure: 1.0,
+                    angle: 0.0,
+                },
+            );
+            motion.points.push(Point {
+                x: -200.0,
+                y: -100.0,
+                pressure: 1.0,
+                angle: 0.0,
+            });
+            effect.cels.insert(
+                0,
+                Arc::new(Cel {
+                    strokes: vec![Arc::new(motion)],
+                }),
+            );
+            rhythm_doc.layers.push(effect);
+            let moved =
+                unsafe { renderer.read_frame(gl, &rhythm_doc.scene(0), [1920, 804]) }.unwrap();
+            let original = (33 * 1920 + 1872) * 4;
+            let translated = (133 * 1920 + 1672) * 4;
+            assert_eq!(
+                &moved[original..original + 3],
+                &[255; 3],
+                "Watermark was reapplied above movement"
+            );
+            assert!(
+                moved[translated] < 40,
+                "Movement did not affect the virtual watermark layer"
+            );
+            rhythm_doc.layers.pop();
+            rhythm_doc.layers[0].inverted = true;
+            let inverted =
+                unsafe { renderer.read_frame(gl, &rhythm_doc.scene(0), [1920, 804]) }.unwrap();
+            assert_eq!(
+                &inverted[original..original + 3],
+                &[255; 3],
+                "XOR inversion did not apply to watermark"
+            );
+            assert_eq!(&inverted[..3], &[0; 3]);
+            rhythm_doc.layers[0].inverted = false;
+            rhythm_doc.settings.watermark = false;
+            let pixels =
+                unsafe { renderer.read_frame(gl, &rhythm_doc.scene(0), [1920, 804]) }.unwrap();
+            assert!(pixels.as_chunks::<4>().0.iter().all(|p| p[..3] == [255; 3]));
+            outputs.push("Rhythm watermark: 1920px integer cells, every beat, group reset, gaps and disabled state verified".into());
+            // The hard marker nib rotates by tilt, respects pressure and round-trips as vectors.
+            let mut marker_doc = Document::default();
+            marker_doc.settings.watermark = false;
+            let mut marker = Stroke::new(
+                200.0,
+                Point {
+                    x: 960.0,
+                    y: 400.0,
+                    pressure: 1.0,
+                    angle: 0.0,
+                },
+            );
+            marker.brush = Brush::Marker;
+            marker_doc.layers[0].cels.insert(
+                0,
+                Arc::new(Cel {
+                    strokes: vec![Arc::new(marker)],
+                }),
+            );
+            for (angle, pressure, w, h) in [
+                (0.0, 1.0, 100, 26),
+                (std::f32::consts::FRAC_PI_2, 1.0, 26, 100),
+                (0.0, 0.5, 50, 14),
+            ] {
+                let stroke = Arc::make_mut(
+                    &mut Arc::make_mut(marker_doc.layers[0].cels.get_mut(&0).unwrap()).strokes[0],
+                );
+                stroke.points[0].angle = angle;
+                stroke.points[0].pressure = pressure;
+                stroke.invalidate_from(0);
+                let pixels =
+                    unsafe { renderer.read_frame(gl, &marker_doc.scene(0), [960, 402]) }.unwrap();
+                let mut bounds = [960, 402, 0, 0];
+                for (i, p) in pixels.as_chunks::<4>().0.iter().enumerate() {
+                    if p[0] < 250 {
+                        let x = i % 960;
+                        let y = i / 960;
+                        bounds[0] = bounds[0].min(x);
+                        bounds[1] = bounds[1].min(y);
+                        bounds[2] = bounds[2].max(x);
+                        bounds[3] = bounds[3].max(y);
+                    }
+                }
+                assert!(
+                    (bounds[2] - bounds[0] + 1).abs_diff(w) <= 1
+                        && (bounds[3] - bounds[1] + 1).abs_diff(h) <= 1,
+                    "Marker pressure/tilt footprint is wrong: {bounds:?}"
+                );
+            }
+            let first = Point {
+                x: 400.0,
+                y: 400.0,
+                pressure: 0.4,
+                angle: 0.0,
+            };
+            let mut marker = Stroke::new(70.0, first);
+            marker.brush = Brush::Marker;
+            marker_doc.layers[0].cels.insert(
+                0,
+                Arc::new(Cel {
+                    strokes: vec![Arc::new(marker)],
+                }),
+            );
+            let mut smoother = StrokeSmoother::new(first);
+            for i in 1..=18 {
+                let a = i as f32 * 0.11;
+                let p = Point {
+                    x: 400.0 + i as f32 * 45.0,
+                    y: 400.0 + (a * 2.0).sin() * 100.0,
+                    pressure: 0.4 + i as f32 / 40.0,
+                    angle: a,
+                };
+                let cel = Arc::make_mut(marker_doc.layers[0].cels.get_mut(&0).unwrap());
+                smoother.push(Arc::make_mut(&mut cel.strokes[0]), p, 1.5);
+                if i % 3 == 0 {
+                    unsafe {
+                        renderer.verify_curve_cache(gl, &marker_doc);
+                    }
+                }
+            }
+            let pixels =
+                unsafe { renderer.read_frame(gl, &marker_doc.scene(0), [960, 402]) }.unwrap();
+            let mut ppm = b"P6\n960 402\n255\n".to_vec();
+            for row in pixels.as_chunks::<{ 960 * 4 }>().0.iter().rev() {
+                for p in row.as_chunks::<4>().0 {
+                    ppm.extend_from_slice(&p[..3]);
+                }
+            }
+            std::fs::write(directory.join("marker-tilt.ppm"), ppm).unwrap();
+            project::save(&directory.join("marker.mori"), &marker_doc).unwrap();
+            let loaded = project::load(&directory.join("marker.mori")).unwrap();
+            assert_eq!(loaded.layers[0].cels[&0].strokes[0].brush, Brush::Marker);
+            assert!(
+                loaded.layers[0].cels[&0].strokes[0]
+                    .points
+                    .last()
+                    .unwrap()
+                    .angle
+                    > 1.8
+            );
+            outputs.push("Marker: hard rectangle, tilt rotation, pressure diameter, incremental curve and project persistence verified".into());
             // Long curves edit their live suffix; incremental VBO contents must remain
             // identical to fresh geometry through batching, pressure, undo and branching.
             let mut curve_doc = Document::default();
             let first = Point {
+                angle: 0.0,
                 x: 1240.0,
                 y: 400.0,
                 pressure: 0.2,
@@ -1038,6 +1260,7 @@ impl Studio {
             for i in 1..=36 {
                 let a = i as f32 / 12.0 * std::f32::consts::TAU;
                 let point = Point {
+                    angle: 0.0,
                     x: 960.0 + a.cos() * 280.0,
                     y: 400.0 + a.sin() * 280.0,
                     pressure: 0.2 + i as f32 / 60.0,
@@ -1074,6 +1297,7 @@ impl Studio {
             previous_smoother.push(
                 Arc::make_mut(&mut cel.strokes[0]),
                 Point {
+                    angle: 0.0,
                     x: 600.0,
                     y: 450.0,
                     pressure: 0.6,
@@ -1091,18 +1315,21 @@ impl Studio {
             outputs.push("Smooth sparse input: incremental GPU geometry matches full rebuild through pressure, undo/redo and branching".into());
             // Blur regressions: all styles stay inside the swept, pressure-sized footprint.
             let mut local_doc = Document::default();
+            local_doc.settings.watermark = false;
             local_doc.settings.aspect = 2.0;
             let mut base = Cel::default();
             for x in [200.0, 800.0, 1400.0] {
                 let mut stroke = Stroke::new(
                     18.0,
                     Point {
+                        angle: 0.0,
                         x,
                         y: 100.0,
                         pressure: 1.0,
                     },
                 );
                 stroke.points.push(Point {
+                    angle: 0.0,
                     x,
                     y: 860.0,
                     pressure: 1.0,
@@ -1115,12 +1342,14 @@ impl Studio {
             let mut blur_stroke = Stroke::new(
                 200.0,
                 Point {
+                    angle: 0.0,
                     x: 600.0,
                     y: 480.0,
                     pressure: 1.0,
                 },
             );
             blur_stroke.points.push(Point {
+                angle: 0.0,
                 x: 1000.0,
                 y: 480.0,
                 pressure: 1.0,
@@ -1164,12 +1393,14 @@ impl Studio {
             let mut second = Stroke::new(
                 120.0,
                 Point {
+                    angle: 0.0,
                     x: 1300.0,
                     y: 650.0,
                     pressure: 1.0,
                 },
             );
             second.points.push(Point {
+                angle: 0.0,
                 x: 1500.0,
                 y: 650.0,
                 pressure: 1.0,
@@ -1205,10 +1436,12 @@ impl Studio {
             outputs
                 .push("Local blur: curved tangents, pressure and coverage verified on GPU".into());
             let mut pressure_doc = Document::default();
+            pressure_doc.settings.watermark = false;
 
             let stroke = Stroke::new(
                 200.0,
                 Point {
+                    angle: 0.0,
                     x: 960.0,
                     y: 400.0,
                     pressure: 0.1,
@@ -1336,6 +1569,7 @@ impl eframe::App for Studio {
         }
         if !ctx.input(|i| i.pointer.any_down()) && !ctx.wants_keyboard_input() {
             self.ui_editing = false;
+            self.timing_origin = None;
         }
         self.keyboard(ctx);
         egui::CentralPanel::default()

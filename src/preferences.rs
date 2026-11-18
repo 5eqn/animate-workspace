@@ -11,12 +11,14 @@ use std::{
 pub struct BrushDefaults {
     pub ink: f32,
     pub liquify: f32,
+    pub marker: f32,
 }
 impl Default for BrushDefaults {
     fn default() -> Self {
         Self {
             ink: 42.0,
             liquify: 240.0,
+            marker: 42.0,
         }
     }
 }
@@ -68,6 +70,7 @@ pub struct Preferences {
     pub brush_defaults: [BrushDefaults; 6],
     pub default_aspect: f32,
     pub default_step: f64,
+    pub default_watermark: bool,
     pub export: OutputPreferences,
 }
 impl Default for Preferences {
@@ -75,19 +78,21 @@ impl Default for Preferences {
         Self {
             onion: Onion::default(),
             pressure_gamma: 1.0,
-            minimum_pressure: 0.05,
+            minimum_pressure: 0.0,
             spacing: 1.5,
             interpolation: Interpolation::Smooth,
             liquify_strength: 0.65,
             bindings: default_bindings(),
-            video_delay_ms: 0.0,
+            video_delay_ms: -64.0,
             pause_behavior: PauseBehavior::default(),
             brush_defaults: [6.0, 42.0, 42.0, 42.0, 100.0, 140.0].map(|ink| BrushDefaults {
                 ink,
                 liquify: 240.0,
+                marker: 42.0,
             }),
             default_aspect: 2.39,
             default_step: 0.125,
+            default_watermark: true,
             export: OutputPreferences::default(),
         }
     }
@@ -97,17 +102,23 @@ impl Preferences {
         let defaults = &self.brush_defaults[blend.shader_id() as usize];
         let mut layer = Layer::new(name, blend, defaults.ink);
         layer.liquify_width = defaults.liquify;
+        layer.marker_width = defaults.marker;
         layer
     }
     pub fn new_document(&self) -> Document {
         let mut document = Document::default();
         document.settings.aspect = self.default_aspect;
+        document.settings.watermark = self.default_watermark;
         document.timing.step = self.default_step;
         self.apply_output(&mut document.settings.export);
         document.settings.export.start = 0.0;
         document.settings.export.end = document.timing.duration;
         document.layers = vec![
-            self.layer("Paper", Blend::Base),
+            {
+                let mut layer = self.layer("Paper", Blend::Base);
+                layer.blend = Blend::Xor;
+                layer
+            },
             self.layer("Ink", Blend::Xor),
             self.layer("Movement", Blend::Move),
             self.layer("Atmosphere", Blend::Blur),
@@ -140,10 +151,11 @@ impl Preferences {
             && self.export.width >= 2
             && self.export.fps > 0
             && self.export.crf <= 51
-            && self
-                .brush_defaults
-                .iter()
-                .all(|b| [b.ink, b.liquify].iter().all(|v| v.is_finite() && *v > 0.0))
+            && self.brush_defaults.iter().all(|b| {
+                [b.ink, b.liquify, b.marker]
+                    .iter()
+                    .all(|v| v.is_finite() && *v > 0.0)
+            })
             && self.onion.opacity.is_finite()
             && (0.0..=1.0).contains(&self.onion.opacity)
             && self.onion.falloff.is_finite()
@@ -166,7 +178,11 @@ impl PreferenceStore {
         let mut warning = None;
         let preferences = match fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice::<Preferences>(&bytes) {
-                Ok(p) if p.valid() => p,
+                Ok(mut p) if p.valid() => {
+                    p.bindings
+                        .retain(|b| !matches!(b.action.as_str(), "Fit" | "Liquify"));
+                    p
+                }
                 _ => {
                     warning = Some("Could not read preferences".into());
                     Preferences::default()
@@ -306,5 +322,37 @@ mod pause_tests {
         older.as_object_mut().unwrap().remove("pause_behavior");
         let migrated: Preferences = serde_json::from_value(older).unwrap();
         assert_eq!(migrated.pause_behavior, PauseBehavior::ReturnToStart);
+    }
+}
+
+#[cfg(test)]
+mod new_default_tests {
+    use super::*;
+    #[test]
+    fn defaults_have_zero_minimum_three_onions_and_watermark_enabled() {
+        let p = Preferences::default();
+        assert_eq!(p.minimum_pressure, 0.0);
+        assert_eq!(p.video_delay_ms, -64.0);
+        assert_eq!((p.onion.previous, p.onion.next), (3, 3));
+        assert!(p.onion.falloff < 1.0);
+        assert!(p.new_document().settings.watermark);
+        assert!(!p
+            .bindings
+            .iter()
+            .any(|b| matches!(b.action.as_str(), "Fit" | "Liquify")));
+    }
+    #[test]
+    fn marker_width_is_independent_and_watermark_defaults_are_local_to_new_projects() {
+        let mut p = Preferences {
+            default_watermark: false,
+            ..Default::default()
+        };
+        p.brush_defaults[1].marker = 78.0;
+        let mut doc = p.new_document();
+        assert!(!doc.settings.watermark);
+        doc.settings.watermark = true;
+        assert!(!p.new_document().settings.watermark);
+        assert_eq!(doc.layers[1].brush_width(Brush::Marker), 78.0);
+        assert_eq!(doc.layers[1].brush_width(Brush::Ink), 42.0);
     }
 }

@@ -1,6 +1,6 @@
 //! Causal, interpolating stroke curves. The newest span reaches the pen immediately;
 //! one future input finalizes its tangent without revisiting the completed prefix.
-use crate::model::{Point, Stroke};
+use crate::model::{interpolate_angle, Point, Stroke};
 
 #[derive(Clone, Copy, Debug)]
 struct V {
@@ -112,7 +112,7 @@ impl Cubic {
         };
         distance(b).max(distance(c))
     }
-    fn sample(self, start_pressure: f32, end_pressure: f32, spacing: f32, out: &mut Vec<Point>) {
+    fn sample(self, start: Point, end: Point, spacing: f32, out: &mut Vec<Point>) {
         let tolerance = spacing.min(1.0) * 0.15;
         let mut pending = vec![(self, 0.0_f32, 1.0_f32)];
         while let Some((curve, t0, t1)) = pending.pop() {
@@ -122,12 +122,13 @@ impl Cubic {
             if (length <= spacing && curve.flatness() <= tolerance) || middle == t0 || middle == t1
             {
                 out.push(Point {
+                    angle: interpolate_angle(start.angle, end.angle, t1),
                     x: d.x,
                     y: d.y,
                     pressure: if t1 == 1.0 {
-                        end_pressure
+                        end.pressure
                     } else {
-                        start_pressure + (end_pressure - start_pressure) * t1
+                        start.pressure + (end.pressure - start.pressure) * t1
                     },
                 });
             } else {
@@ -140,6 +141,7 @@ impl Cubic {
 }
 fn reflected(origin: Point, toward: Point) -> Point {
     Point {
+        angle: origin.angle,
         x: 2.0 * origin.x - toward.x,
         y: 2.0 * origin.y - toward.y,
         pressure: origin.pressure,
@@ -157,6 +159,9 @@ impl StrokeSmoother {
             controls: vec![first],
             stable_len: 1,
         }
+    }
+    pub fn stationary_angle(&mut self, angle: f32) {
+        self.controls.last_mut().unwrap().angle = angle;
     }
     pub fn stationary_pressure(&mut self, pressure: f32) {
         let last = self.controls.last_mut().unwrap();
@@ -187,7 +192,7 @@ impl StrokeSmoother {
             } else {
                 curve
             };
-            curve.sample(start.pressure, end.pressure, spacing, &mut stroke.points);
+            curve.sample(start, end, spacing, &mut stroke.points);
             self.stable_len = stroke.points.len();
         }
         let start = self.controls[n - 2];
@@ -203,7 +208,7 @@ impl StrokeSmoother {
         } else {
             curve
         };
-        curve.sample(start.pressure, end.pressure, spacing, &mut stroke.points);
+        curve.sample(start, end, spacing, &mut stroke.points);
         if self.controls.len() > 3 {
             self.controls.remove(0);
         }
@@ -214,7 +219,12 @@ impl StrokeSmoother {
 mod tests {
     use super::*;
     fn p(x: f32, y: f32, pressure: f32) -> Point {
-        Point { x, y, pressure }
+        Point {
+            angle: 0.0,
+            x,
+            y,
+            pressure,
+        }
     }
     fn tangent(a: V, b: V) -> V {
         let d = b.sub(a);
@@ -331,5 +341,33 @@ mod tests {
             .points
             .iter()
             .all(|p| p.pressure >= 0.2 && p.pressure <= 0.9));
+    }
+}
+
+#[cfg(test)]
+mod angle_tests {
+    use super::*;
+    #[test]
+    fn smooth_marker_interpolates_the_shortest_nib_orientation_without_losing_pressure() {
+        let first = Point {
+            x: 0.0,
+            y: 0.0,
+            pressure: 0.2,
+            angle: 3.13,
+        };
+        let end = Point {
+            x: 100.0,
+            y: 50.0,
+            pressure: 0.9,
+            angle: 0.01,
+        };
+        let mut stroke = Stroke::new(100.0, first);
+        stroke.brush = crate::model::Brush::Marker;
+        let mut smooth = StrokeSmoother::new(first);
+        smooth.push(&mut stroke, end, 1.5);
+        assert_eq!(*stroke.points.last().unwrap(), end);
+        assert!(stroke.points[1..stroke.points.len() - 1]
+            .iter()
+            .all(|p| p.angle > 3.12 && p.pressure >= 0.2 && p.pressure <= 0.9));
     }
 }

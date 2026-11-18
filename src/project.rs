@@ -50,6 +50,12 @@ pub fn load(path: &Path) -> Result<Document, String> {
     }
     document.validate()?;
     for layer in &mut document.layers {
+        if layer.blend == crate::model::Blend::Base {
+            layer.blend = crate::model::Blend::Xor;
+        }
+    }
+    document.snap_exposures();
+    for layer in &mut document.layers {
         for cel in layer.cels.values_mut() {
             for stroke in &mut Arc::make_mut(cel).strokes {
                 Arc::make_mut(stroke).id = crate::model::next_revision();

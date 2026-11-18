@@ -1,4 +1,4 @@
-use crate::model::{Scene, Stroke};
+use crate::model::{marker_corners, Brush, Scene, Stroke};
 use eframe::{
     egui,
     glow::{self, HasContext},
@@ -79,26 +79,89 @@ fn disk(out: &mut Vec<f32>, x: f32, y: f32, r: f32, flow: [f32; 2]) {
         vertex(out, x + b.cos() * r, y + b.sin() * r, flow);
     }
 }
+fn cap(out: &mut Vec<f32>, stroke: &Stroke, index: usize) {
+    let p = stroke.points[index];
+    let flow = direction(stroke, index);
+    if stroke.brush == Brush::Marker {
+        let corners = marker_corners(p, stroke.width);
+        for i in [0, 1, 2, 0, 2, 3] {
+            vertex(out, corners[i][0], corners[i][1], flow);
+        }
+    } else {
+        disk(out, p.x, p.y, stroke.width * p.pressure * 0.5, flow);
+    }
+}
+fn marker_geometry(stroke: &Stroke, from: usize) -> (Vec<f32>, Vec<usize>) {
+    let mut vertices = Vec::new();
+    let mut offsets = Vec::new();
+    if from == 0 && !stroke.points.is_empty() {
+        offsets.push(0);
+        cap(&mut vertices, stroke, 0);
+    }
+    for i in from.max(1)..stroke.points.len() {
+        offsets.push(vertices.len());
+        // Convex hull of two oriented nibs is the swept hard-edged mark. Dense
+        // curve sampling makes tilt changes continuous without width-dependent work.
+        let mut points: Vec<([f32; 2], [f32; 2])> =
+            marker_corners(stroke.points[i - 1], stroke.width)
+                .into_iter()
+                .map(|p| (p, direction(stroke, i - 1)))
+                .chain(
+                    marker_corners(stroke.points[i], stroke.width)
+                        .into_iter()
+                        .map(|p| (p, direction(stroke, i))),
+                )
+                .collect();
+        points.sort_by(|a, b| a.0[0].total_cmp(&b.0[0]).then(a.0[1].total_cmp(&b.0[1])));
+        points.dedup_by(|a, b| a.0 == b.0);
+        let cross = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| {
+            (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+        };
+        let mut hull: Vec<([f32; 2], [f32; 2])> = Vec::new();
+        for &point in &points {
+            while hull.len() >= 2
+                && cross(hull[hull.len() - 2].0, hull[hull.len() - 1].0, point.0) <= 0.0
+            {
+                hull.pop();
+            }
+            hull.push(point);
+        }
+        let lower = hull.len();
+        for &point in points.iter().rev().skip(1) {
+            while hull.len() > lower
+                && cross(hull[hull.len() - 2].0, hull[hull.len() - 1].0, point.0) <= 0.0
+            {
+                hull.pop();
+            }
+            hull.push(point);
+        }
+        if hull.len() > 1 {
+            hull.pop();
+        }
+        for j in 1..hull.len().saturating_sub(1) {
+            for index in [0, j, j + 1] {
+                let (p, flow) = hull[index];
+                vertex(&mut vertices, p[0], p[1], flow);
+            }
+        }
+    }
+    (vertices, offsets)
+}
 #[cfg(test)]
 fn append_geometry(stroke: &Stroke, from: usize) -> Vec<f32> {
     geometry(stroke, from).0
 }
 fn geometry(stroke: &Stroke, from: usize) -> (Vec<f32>, Vec<usize>) {
+    if stroke.brush == Brush::Marker {
+        return marker_geometry(stroke, from);
+    }
     let mut vertices = Vec::new();
     let mut offsets = Vec::with_capacity(stroke.points.len() - from);
     if from == 0 && !stroke.points.is_empty() {
         offsets.push(0);
     }
-    if from == 0 {
-        if let Some(p) = stroke.points.first() {
-            disk(
-                &mut vertices,
-                p.x,
-                p.y,
-                stroke.width * p.pressure * 0.5,
-                direction(stroke, 0),
-            );
-        }
+    if from == 0 && !stroke.points.is_empty() {
+        cap(&mut vertices, stroke, 0);
     }
     for i in from.max(1)..stroke.points.len() {
         offsets.push(vertices.len());
@@ -327,28 +390,16 @@ impl Renderer {
         if mesh.points < stroke.points.len() {
             let (mut vertices, offsets) = geometry(stroke, mesh.points);
             let body_added = vertices.len();
-            if let Some(p) = stroke.points.last() {
-                disk(
-                    &mut vertices,
-                    p.x,
-                    p.y,
-                    stroke.width * p.pressure * 0.5,
-                    direction(stroke, stroke.points.len() - 1),
-                );
+            if !stroke.points.is_empty() {
+                cap(&mut vertices, stroke, stroke.points.len() - 1);
             }
             let needed = mesh.body_count + vertices.len();
             if needed > mesh.capacity {
                 let (mut all, all_offsets) = geometry(stroke, 0);
                 mesh.point_offsets = all_offsets;
                 mesh.body_count = all.len();
-                if let Some(p) = stroke.points.last() {
-                    disk(
-                        &mut all,
-                        p.x,
-                        p.y,
-                        stroke.width * p.pressure * 0.5,
-                        direction(stroke, stroke.points.len() - 1),
-                    );
+                if !stroke.points.is_empty() {
+                    cap(&mut all, stroke, stroke.points.len() - 1);
                 }
                 mesh.capacity = all.len().next_power_of_two();
                 gl.buffer_data_size(
@@ -397,6 +448,28 @@ impl Renderer {
         gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.targets[front].framebuffer));
         gl.clear_color(1.0, 1.0, 1.0, 1.0);
         gl.clear(glow::COLOR_BUFFER_BIT);
+        if let Some(rhythm) = scene.rhythm {
+            let next = 1 - front;
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.targets[next].framebuffer));
+            gl.use_program(Some(self.composite));
+            Self::texture(gl, self.composite, "below", 0, self.targets[front].texture);
+            Self::uniform_i(gl, self.composite, "mode", 6);
+            gl.uniform_2_i32(
+                gl.get_uniform_location(self.composite, "rhythm_grid")
+                    .as_ref(),
+                rhythm.cols as i32,
+                rhythm.rows as i32,
+            );
+            Self::uniform_i(gl, self.composite, "rhythm_filled", rhythm.filled as i32);
+            gl.uniform_2_i32(
+                gl.get_uniform_location(self.composite, "pixel_size")
+                    .as_ref(),
+                size[0],
+                size[1],
+            );
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            front = next;
+        }
         for layer in &scene.layers {
             if layer.blend.effect() && layer.cel.strokes.is_empty() {
                 continue;
@@ -627,9 +700,11 @@ impl Renderer {
         use crate::model::*;
         let mut document = Document::default();
         document.settings.aspect = 2.0;
+        document.settings.watermark = false;
         let mut stroke = Stroke::new(
             160.0,
             Point {
+                angle: 0.0,
                 x: 400.0,
                 y: 250.0,
                 pressure: 0.5,
@@ -637,11 +712,13 @@ impl Renderer {
         );
         stroke.points.extend([
             Point {
+                angle: 0.0,
                 x: 800.0,
                 y: 250.0,
                 pressure: 0.5,
             },
             Point {
+                angle: 0.0,
                 x: 800.0,
                 y: 700.0,
                 pressure: 1.0,
@@ -728,6 +805,7 @@ mod tests {
         let mut stroke = Stroke::new(
             6.0,
             Point {
+                angle: 0.0,
                 x: 0.0,
                 y: 0.0,
                 pressure: 0.5,
@@ -735,6 +813,7 @@ mod tests {
         );
         stroke.points = (0..1000)
             .map(|i| Point {
+                angle: 0.0,
                 x: i as f32,
                 y: (i as f32 * 0.01).sin() * 40.0,
                 pressure: 0.5,
