@@ -1,5 +1,4 @@
-//! Adds Settings to the existing AppKit application menu without replacing its
-//! About, Services, Hide or Quit items. The retained target owns the action.
+//! AppKit menus share the application's action handlers and configurable bindings.
 #[cfg(target_os = "macos")]
 mod mac {
     use super::key_equivalent;
@@ -11,38 +10,108 @@ mod mac {
     };
     use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem};
     use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
-    use std::{cell::Cell, rc::Rc};
+    use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+    type Requests = Rc<RefCell<VecDeque<&'static str>>>;
     struct ActionState {
-        requested: Rc<Cell<bool>>,
+        requested: Requests,
+        action: &'static str,
         ctx: egui::Context,
     }
     define_class!(
         #[unsafe(super=NSObject)]
         #[thread_kind=MainThreadOnly]
         #[ivars=ActionState]
-        struct SettingsTarget;
-        unsafe impl NSObjectProtocol for SettingsTarget{}
-        impl SettingsTarget{
-            #[unsafe(method(moriOpenSettings:))]
-            fn open_settings(&self,_sender:Option<&AnyObject>){self.ivars().requested.set(true);self.ivars().ctx.request_repaint();}
+        struct MenuTarget;
+        unsafe impl NSObjectProtocol for MenuTarget {}
+        impl MenuTarget {
+            #[unsafe(method(moriMenuAction:))]
+            fn invoke(&self, _sender: Option<&AnyObject>) {
+                self.ivars().requested.borrow_mut().push_back(self.ivars().action);
+                self.ivars().ctx.request_repaint();
+            }
         }
     );
-    impl SettingsTarget {
+    impl MenuTarget {
         fn new(
             mtm: MainThreadMarker,
-            requested: Rc<Cell<bool>>,
+            requested: Requests,
+            action: &'static str,
             ctx: egui::Context,
         ) -> Retained<Self> {
-            let this = Self::alloc(mtm).set_ivars(ActionState { requested, ctx });
+            let this = Self::alloc(mtm).set_ivars(ActionState {
+                requested,
+                action,
+                ctx,
+            });
             unsafe { msg_send![super(this), init] }
         }
     }
-    pub struct NativeMenu {
+    struct Entry {
+        action: &'static str,
+        title: &'static str,
         item: Retained<NSMenuItem>,
-        menu: Retained<NSMenu>,
-        _target: Retained<SettingsTarget>,
-        requested: Rc<Cell<bool>>,
+        _target: Retained<MenuTarget>,
         last: Option<(bool, String, u64)>,
+    }
+    impl Entry {
+        fn new(
+            mtm: MainThreadMarker,
+            requested: Requests,
+            ctx: egui::Context,
+            action: &'static str,
+            title: &'static str,
+        ) -> Self {
+            let target = MenuTarget::new(mtm, requested, action, ctx);
+            let item = NSMenuItem::new(mtm);
+            unsafe {
+                item.setTarget(Some(&target));
+                item.setAction(Some(sel!(moriMenuAction:)));
+            }
+            Self {
+                action,
+                title,
+                item,
+                _target: target,
+                last: None,
+            }
+        }
+        fn sync(&mut self, chinese: bool, bindings: &[Binding], enabled: bool) {
+            let binding = bindings.iter().find(|b| b.action == self.action);
+            let key = binding.map_or_else(String::new, |b| key_equivalent(&b.key));
+            let mut flags = NSEventModifierFlags::empty();
+            if let Some(b) = binding {
+                if b.command {
+                    flags |= NSEventModifierFlags::Command;
+                }
+                if b.control {
+                    flags |= NSEventModifierFlags::Control;
+                }
+                if b.alt {
+                    flags |= NSEventModifierFlags::Option;
+                }
+                if b.shift {
+                    flags |= NSEventModifierFlags::Shift;
+                }
+            }
+            self.item.setEnabled(enabled);
+            let identity = (chinese, key.clone(), flags.bits() as u64);
+            if self.last.as_ref() == Some(&identity) {
+                return;
+            }
+            self.item
+                .setTitle(&NSString::from_str(&i18n::translate(chinese, self.title)));
+            self.item.setKeyEquivalent(&NSString::from_str(&key));
+            self.item.setKeyEquivalentModifierMask(flags);
+            self.last = Some(identity);
+        }
+    }
+    pub struct NativeMenu {
+        entries: Vec<Entry>,
+        app_menu: Retained<NSMenu>,
+        settings_separator: Retained<NSMenuItem>,
+        bar: Retained<NSMenu>,
+        file_root: Retained<NSMenuItem>,
+        requested: Requests,
     }
     impl NativeMenu {
         pub fn new(ctx: egui::Context) -> Self {
@@ -59,66 +128,61 @@ mod mac {
                 bar.addItem(&root);
                 root
             });
-            let menu = root.submenu().unwrap_or_else(|| {
+            let app_menu = root.submenu().unwrap_or_else(|| {
                 let menu = NSMenu::new(mtm);
                 root.setSubmenu(Some(&menu));
                 menu
             });
-            let requested = Rc::new(Cell::new(false));
-            let target = SettingsTarget::new(mtm, requested.clone(), ctx);
-            let item = NSMenuItem::new(mtm);
-            item.setEnabled(true);
-            unsafe {
-                item.setTarget(Some(&target));
-                item.setAction(Some(sel!(moriOpenSettings:)));
+            let requested = Requests::default();
+            let settings = Entry::new(mtm, requested.clone(), ctx.clone(), "Settings", "Settings…");
+            let index = app_menu.numberOfItems().min(2);
+            app_menu.insertItem_atIndex(&settings.item, index);
+            let settings_separator = NSMenuItem::separatorItem(mtm);
+            app_menu.insertItem_atIndex(&settings_separator, index + 1);
+            let file_root = NSMenuItem::new(mtm);
+            let file_menu = NSMenu::new(mtm);
+            file_menu.setAutoenablesItems(false);
+            file_root.setSubmenu(Some(&file_menu));
+            bar.insertItem_atIndex(&file_root, 1);
+            let mut entries = vec![settings];
+            for (action, title) in [
+                ("New", "New project"),
+                ("Save", "Save"),
+                ("Save as", "Save as…"),
+                ("Export", "Export video…"),
+            ] {
+                if action == "Save" || action == "Export" {
+                    file_menu.addItem(&NSMenuItem::separatorItem(mtm));
+                }
+                let entry = Entry::new(mtm, requested.clone(), ctx.clone(), action, title);
+                file_menu.addItem(&entry.item);
+                entries.push(entry);
             }
-            let index = menu.numberOfItems().min(2);
-            menu.insertItem_atIndex(&item, index);
-            menu.insertItem_atIndex(&NSMenuItem::separatorItem(mtm), index + 1);
             Self {
-                item,
-                menu,
-                _target: target,
+                entries,
+                app_menu,
+                settings_separator,
+                bar,
+                file_root,
                 requested,
-                last: None,
             }
         }
-        pub fn sync(&mut self, chinese: bool, binding: Option<&Binding>) {
-            let key = binding.map_or_else(|| ",".into(), |b| key_equivalent(&b.key));
-            let mut flags = NSEventModifierFlags::empty();
-            if let Some(b) = binding {
-                if b.command {
-                    flags |= NSEventModifierFlags::Command;
-                }
-                if b.control {
-                    flags |= NSEventModifierFlags::Control;
-                }
-                if b.alt {
-                    flags |= NSEventModifierFlags::Option;
-                }
-                if b.shift {
-                    flags |= NSEventModifierFlags::Shift;
-                }
-            } else {
-                flags = NSEventModifierFlags::Command;
+        pub fn sync(&mut self, chinese: bool, bindings: &[Binding], enabled: bool) {
+            self.file_root
+                .setTitle(&NSString::from_str(&i18n::translate(chinese, "File")));
+            for entry in &mut self.entries {
+                entry.sync(chinese, bindings, enabled);
             }
-            let identity = (chinese, key.clone(), flags.bits() as u64);
-            if self.last.as_ref() == Some(&identity) {
-                return;
-            }
-            self.item
-                .setTitle(&NSString::from_str(&i18n::translate(chinese, "Settings…")));
-            self.item.setKeyEquivalent(&NSString::from_str(&key));
-            self.item.setKeyEquivalentModifierMask(flags);
-            self.last = Some(identity);
         }
-        pub fn take_settings(&self) -> bool {
-            self.requested.replace(false)
+        pub fn take_actions(&self) -> Vec<&'static str> {
+            self.requested.borrow_mut().drain(..).collect()
         }
     }
     impl Drop for NativeMenu {
         fn drop(&mut self) {
-            self.menu.removeItem(&self.item);
+            self.app_menu.removeItem(&self.entries[0].item);
+            self.app_menu.removeItem(&self.settings_separator);
+            self.bar.removeItem(&self.file_root);
         }
     }
 }
@@ -131,9 +195,9 @@ impl NativeMenu {
     pub fn new(_ctx: eframe::egui::Context) -> Self {
         Self
     }
-    pub fn sync(&mut self, _chinese: bool, _binding: Option<&crate::model::Binding>) {}
-    pub fn take_settings(&self) -> bool {
-        false
+    pub fn sync(&mut self, _chinese: bool, _bindings: &[crate::model::Binding], _enabled: bool) {}
+    pub fn take_actions(&self) -> Vec<&'static str> {
+        Vec::new()
     }
 }
 

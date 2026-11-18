@@ -151,6 +151,16 @@ fn marker_geometry(stroke: &Stroke, from: usize) -> (Vec<f32>, Vec<usize>) {
 fn append_geometry(stroke: &Stroke, from: usize) -> Vec<f32> {
     geometry(stroke, from).0
 }
+/// The same filled triangles used by the GPU, including the live end cap.
+/// Stroke erasing queries these so rectangular nibs and pressure edges agree
+/// with what is drawn.
+pub(crate) fn hit_geometry(stroke: &Stroke) -> Vec<f32> {
+    let mut vertices = geometry(stroke, 0).0;
+    if !stroke.points.is_empty() {
+        cap(&mut vertices, stroke, stroke.points.len() - 1);
+    }
+    vertices
+}
 fn geometry(stroke: &Stroke, from: usize) -> (Vec<f32>, Vec<usize>) {
     if stroke.brush == Brush::Marker {
         return marker_geometry(stroke, from);

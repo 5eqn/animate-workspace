@@ -196,6 +196,10 @@ pub enum Brush {
     Ink,
     Marker,
     Liquify,
+    Eraser,
+}
+fn default_eraser_width() -> f32 {
+    42.0
 }
 fn default_marker_width() -> f32 {
     42.0
@@ -215,6 +219,8 @@ pub struct Layer {
     pub liquify_width: f32,
     #[serde(default = "default_marker_width")]
     pub marker_width: f32,
+    #[serde(default = "default_eraser_width")]
+    pub eraser_width: f32,
     pub strength: f32,
     pub cels: BTreeMap<Tick, Arc<Cel>>,
 }
@@ -229,6 +235,7 @@ impl Layer {
             width,
             liquify_width: default_liquify_width(),
             marker_width: default_marker_width(),
+            eraser_width: default_eraser_width(),
             strength: 1.0,
             cels: BTreeMap::new(),
         }
@@ -238,6 +245,7 @@ impl Layer {
             Brush::Ink => self.width,
             Brush::Marker => self.marker_width,
             Brush::Liquify => self.liquify_width,
+            Brush::Eraser => self.eraser_width,
         }
     }
     pub fn brush_width_mut(&mut self, brush: Brush) -> &mut f32 {
@@ -245,6 +253,7 @@ impl Layer {
             Brush::Ink => &mut self.width,
             Brush::Marker => &mut self.marker_width,
             Brush::Liquify => &mut self.liquify_width,
+            Brush::Eraser => &mut self.eraser_width,
         }
     }
     pub fn held(&self, time: Tick) -> Option<&Arc<Cel>> {
@@ -701,6 +710,8 @@ impl Document {
                 || l.marker_width <= 0.0
                 || !l.liquify_width.is_finite()
                 || l.liquify_width <= 0.0
+                || !l.eraser_width.is_finite()
+                || l.eraser_width <= 0.0
                 || !l.strength.is_finite()
             {
                 return Err("Invalid layer settings".into());

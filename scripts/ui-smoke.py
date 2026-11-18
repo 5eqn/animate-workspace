@@ -22,7 +22,7 @@ def click(x,y,button=1):
     time.sleep(.25)
 
 def brush(name):
-    directions={'round':(720,425),'marker':(770,510),'liquify':(670,510)}
+    directions={'round':(720,425),'marker':(770,510),'liquify':(670,510),'eraser':(720,540)}
     subprocess.run(['xdotool','mousemove','720','480','mousedown','3'],check=True)
     time.sleep(.1)
     x,y=directions[name]
@@ -94,9 +94,9 @@ with tempfile.TemporaryDirectory(prefix='mori-ui-') as temporary:
         key('ctrl+comma');click(90,124)
         click(975,303);popup=shot('settings-grid-popup');dark_surface(popup,(930,345,1010,500));key('Escape')
         click(90,172)
-        edit(812,675,84)
-        edit(967,675,360)
-        assert json.loads(prefs.read_text())['brush_defaults'][1]=={'ink':84.0,'liquify':360.0,'marker':42.0}
+        edit(727,675,84)
+        edit(895,675,360)
+        assert json.loads(prefs.read_text())['brush_defaults'][1]=={'ink':84.0,'liquify':360.0,'marker':42.0,'eraser':42.0}
         click(90,268)
         # Edit a global preference through the actual UI, without saving a project.
         subprocess.run(['xdotool','mousemove','978','152','click','--repeat','2','--delay','80','1'],check=True)

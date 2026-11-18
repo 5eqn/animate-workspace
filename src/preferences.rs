@@ -15,6 +15,7 @@ pub struct BrushDefaults {
     pub ink: f32,
     pub liquify: f32,
     pub marker: f32,
+    pub eraser: f32,
 }
 impl Default for BrushDefaults {
     fn default() -> Self {
@@ -22,6 +23,7 @@ impl Default for BrushDefaults {
             ink: 42.0,
             liquify: 240.0,
             marker: 42.0,
+            eraser: 42.0,
         }
     }
 }
@@ -71,6 +73,7 @@ pub struct Preferences {
     /// Positive means the picture is delayed relative to the device's audio clock.
     pub video_delay_ms: f64,
     pub pause_behavior: PauseBehavior,
+    pub timeline_follow: bool,
     pub brush_defaults: [BrushDefaults; 6],
     pub default_aspect: f32,
     pub default_step: f64,
@@ -90,10 +93,12 @@ impl Default for Preferences {
             bindings: default_bindings(),
             video_delay_ms: -64.0,
             pause_behavior: PauseBehavior::default(),
+            timeline_follow: true,
             brush_defaults: [6.0, 42.0, 42.0, 42.0, 100.0, 140.0].map(|ink| BrushDefaults {
                 ink,
                 liquify: 240.0,
                 marker: 42.0,
+                eraser: 42.0,
             }),
             default_aspect: 2.39,
             default_step: 0.125,
@@ -142,6 +147,7 @@ impl Preferences {
         let mut layer = Layer::new(name, blend, defaults.ink);
         layer.liquify_width = defaults.liquify;
         layer.marker_width = defaults.marker;
+        layer.eraser_width = defaults.eraser;
         layer
     }
     pub fn new_document(&self) -> Document {
@@ -197,7 +203,7 @@ impl Preferences {
             && self.export.fps > 0
             && self.export.crf <= 51
             && self.brush_defaults.iter().all(|b| {
-                [b.ink, b.liquify, b.marker]
+                [b.ink, b.liquify, b.marker, b.eraser]
                     .iter()
                     .all(|v| v.is_finite() && *v > 0.0)
             })
@@ -461,6 +467,36 @@ mod new_default_tests {
 #[cfg(test)]
 mod settings_transfer_tests {
     use super::*;
+    #[test]
+    fn follow_and_eraser_defaults_migrate_and_persist_independently() {
+        let mut legacy = serde_json::to_value(Preferences::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("timeline_follow");
+        for defaults in legacy["brush_defaults"].as_array_mut().unwrap() {
+            defaults.as_object_mut().unwrap().remove("eraser");
+        }
+        let mut prefs: Preferences = serde_json::from_value(legacy).unwrap();
+        assert!(prefs.timeline_follow);
+        assert_eq!(prefs.brush_defaults[0].eraser, 42.0);
+        prefs.timeline_follow = false;
+        prefs.brush_defaults[0].eraser = 96.0;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, _, _) = PreferenceStore::at(dir.path().join("prefs.json"));
+        store.save_if_changed(&prefs).unwrap();
+        let (_, prefs, warning) = PreferenceStore::at(store.path);
+        assert!(warning.is_none());
+        assert!(!prefs.timeline_follow);
+        let mut layer = prefs.layer("Test", Blend::Base);
+        assert_eq!(layer.brush_width(Brush::Eraser), 96.0);
+        *layer.brush_width_mut(Brush::Eraser) = 128.0;
+        assert_eq!(layer.brush_width(Brush::Ink), 6.0);
+        let saved = serde_json::to_value(&layer).unwrap();
+        let restored: Layer = serde_json::from_value(saved.clone()).unwrap();
+        assert_eq!(restored.brush_width(Brush::Eraser), 128.0);
+        let mut legacy = saved;
+        legacy.as_object_mut().unwrap().remove("eraser_width");
+        let restored: Layer = serde_json::from_value(legacy).unwrap();
+        assert_eq!(restored.brush_width(Brush::Eraser), 42.0);
+    }
     #[test]
     fn settings_export_import_roundtrips_all_preferences_and_not_project_data() {
         let dir = tempfile::tempdir().unwrap();

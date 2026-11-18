@@ -1,6 +1,7 @@
 mod app;
 mod audio;
 mod curve;
+mod erase;
 mod export;
 mod i18n;
 mod model;

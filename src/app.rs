@@ -1,6 +1,7 @@
 use crate::{
     audio::{DecodedAudio, Transport},
     curve::StrokeSmoother,
+    erase::EraserIndex,
     export::ExportJob,
     i18n::{self, Language},
     model::*,
@@ -43,6 +44,8 @@ struct Drawing {
     smoother: Option<StrokeSmoother>,
     liquify: bool,
     index: Option<SpatialIndex>,
+    eraser: Option<EraserIndex>,
+    recorded: bool,
 }
 enum Background {
     Imported(AudioAsset, DecodedAudio),
@@ -289,8 +292,11 @@ impl Studio {
                 self.layer = self.layer.saturating_sub(1);
             }
             "Smaller" | "Larger" => {
-                if self.drawing.is_none() {
+                if self.drawing.as_ref().is_none_or(|d| !d.recorded) {
                     self.record();
+                    if let Some(drawing) = &mut self.drawing {
+                        drawing.recorded = true;
+                    }
                 }
                 let width = self.doc.layers[self.layer].brush_width_mut(self.tool);
                 *width = if action == "Larger" {
@@ -746,6 +752,22 @@ impl Studio {
         }
     }
     fn start_stroke(&mut self, point: Point) {
+        if self.tool == Tool::Eraser {
+            let cel = self.doc.layers[self.layer].held(tick(self.time));
+            let index = EraserIndex::new(cel.map_or(&Cel::default(), |c| c));
+            self.drawing = Some(Drawing {
+                layer: self.layer,
+                time: tick(self.time),
+                last: point,
+                smoother: None,
+                liquify: false,
+                index: None,
+                eraser: Some(index),
+                recorded: false,
+            });
+            self.erase_segment(point);
+            return;
+        }
         self.record();
         let liquify = self.tool == Tool::Liquify;
         let time = tick(self.time);
@@ -778,9 +800,36 @@ impl Studio {
             },
             liquify,
             index,
+            eraser: None,
+            recorded: true,
         });
     }
+    fn erase_segment(&mut self, point: Point) {
+        let Some(mut drawing) = self.drawing.take() else {
+            return;
+        };
+        let width = self.doc.layers[drawing.layer].brush_width(Tool::Eraser);
+        let hits = drawing
+            .eraser
+            .as_mut()
+            .unwrap()
+            .sweep(drawing.last, point, width * 0.5);
+        if !hits.is_empty() {
+            if !drawing.recorded {
+                self.record();
+                drawing.recorded = true;
+            }
+            let cel = self.doc.layers[drawing.layer].begin_edit(drawing.time, true);
+            cel.strokes.retain(|stroke| !hits.contains(&stroke.id));
+        }
+        drawing.last = point;
+        self.drawing = Some(drawing);
+    }
     fn move_stroke(&mut self, point: Point) {
+        if self.drawing.as_ref().is_some_and(|d| d.eraser.is_some()) {
+            self.erase_segment(point);
+            return;
+        }
         let Some(drawing) = &mut self.drawing else {
             return;
         };
@@ -1608,19 +1657,25 @@ impl eframe::App for Studio {
         let language_at_frame_start = self.preferences.language;
         i18n::use_language(ctx, self.preferences.language, &self.system_locale);
         let chinese = self.preferences.language.chinese(&self.system_locale);
-        self.native_menu.sync(
-            chinese,
-            self.preferences
-                .bindings
-                .iter()
-                .find(|b| b.action == "Settings"),
-        );
-        if self.native_menu.take_settings() {
-            if self.page != Page::Settings {
-                self.return_page = self.page;
+        let menu_enabled = self.drawing.is_none()
+            && self.background.is_none()
+            && self.pending.is_none()
+            && !self.reset_preferences;
+        self.native_menu
+            .sync(chinese, &self.preferences.bindings, menu_enabled);
+        for action in self.native_menu.take_actions() {
+            if !menu_enabled || self.pending.is_some() || self.background.is_some() {
+                continue;
             }
-            self.page = Page::Settings;
-            self.brush_wheel = None;
+            if action == "Settings" {
+                if self.page != Page::Settings {
+                    self.return_page = self.page;
+                }
+                self.page = Page::Settings;
+                self.brush_wheel = None;
+            } else {
+                self.action(action, ctx);
+            }
         }
         self.poll_background();
         if let Some(error) = self.transport.take_error() {

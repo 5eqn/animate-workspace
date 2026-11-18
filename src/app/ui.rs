@@ -278,11 +278,12 @@ fn menu_row(ui: &mut egui::Ui, name: &str, control: impl FnOnce(&mut egui::Ui)) 
         control,
     );
 }
-fn wheel_directions() -> [(Brush, f32); 3] {
+fn wheel_directions() -> [(Brush, f32); 4] {
     [
         (Brush::Ink, -std::f32::consts::FRAC_PI_2),
         (Brush::Marker, std::f32::consts::PI / 6.0),
         (Brush::Liquify, 5.0 * std::f32::consts::PI / 6.0),
+        (Brush::Eraser, std::f32::consts::FRAC_PI_2),
     ]
 }
 fn wheel_choice(center: Pos2, pos: Pos2) -> Option<Brush> {
@@ -313,6 +314,23 @@ fn brush_icon(p: &egui::Painter, c: Pos2, brush: Brush, color: Color32) {
             .map(|p| Pos2::new(p[0], p[1]))
             .to_vec();
             p.add(egui::Shape::convex_polygon(corners, color, UiStroke::NONE));
+        }
+        Brush::Eraser => {
+            let points = vec![
+                c + Vec2::new(-11.0, 3.0),
+                c + Vec2::new(1.0, -10.0),
+                c + Vec2::new(12.0, 0.0),
+                c + Vec2::new(2.0, 11.0),
+                c + Vec2::new(-3.0, 11.0),
+            ];
+            p.add(PathShape::closed_line(
+                points,
+                UiStroke::new(1.6_f32, color),
+            ));
+            p.line_segment(
+                [c + Vec2::new(-5.0, -3.0), c + Vec2::new(6.0, 7.0)],
+                UiStroke::new(1.6_f32, color),
+            );
         }
         Brush::Liquify => {
             let mut points = vec![c + Vec2::new(0.0, -12.0)];
@@ -440,11 +458,28 @@ impl Studio {
             ));
             p.circle_filled(center, 82.0, PANEL);
             p.circle_stroke(center, 82.0, UiStroke::new(1.0_f32, LINE));
-            for (brush, angle) in wheel_directions() {
+            let directions = [
+                wheel_directions()[0],
+                wheel_directions()[1],
+                wheel_directions()[3],
+                wheel_directions()[2],
+            ];
+            for (index, &(brush, angle)) in directions.iter().enumerate() {
+                let previous = if index == 0 {
+                    directions[3].1 - std::f32::consts::TAU
+                } else {
+                    directions[index - 1].1
+                };
+                let next = if index == 3 {
+                    directions[0].1 + std::f32::consts::TAU
+                } else {
+                    directions[index + 1].1
+                };
+                let from = (previous + angle) * 0.5;
+                let to = (angle + next) * 0.5;
                 let mut points = vec![center];
                 for i in 0..=32 {
-                    let a = angle - std::f32::consts::PI / 3.0
-                        + i as f32 / 32.0 * std::f32::consts::TAU / 3.0;
+                    let a = from + i as f32 / 32.0 * (to - from);
                     points.push(center + Vec2::angled(a) * 80.0);
                 }
                 p.add(egui::Shape::convex_polygon(
@@ -584,6 +619,14 @@ impl Studio {
             }
         }
         let span = duration / self.timeline_zoom as f64;
+        let playhead_time = if self.transport.playing {
+            self.transport.position()
+        } else {
+            self.time
+        };
+        if self.preferences.timeline_follow && self.transport.playing {
+            self.timeline_start = followed_start(self.timeline_start, span, playhead_time);
+        }
         self.timeline_start = self.timeline_start.clamp(0.0, (duration - span).max(0.0));
         let start = self.timeline_start;
         let end = start + span;
@@ -902,11 +945,7 @@ impl Studio {
                 self.set_time(at(pos));
             }
         }
-        let playhead = x(if self.transport.playing {
-            self.transport.position()
-        } else {
-            self.time
-        });
+        let playhead = x(playhead_time);
         let playhead_p = ui
             .painter()
             .with_clip_rect(Rect::from_min_max(tracks.min, rect.max));
@@ -1495,6 +1534,7 @@ impl Studio {
                             });
                             group(ui, "New layer sizes");
                             row(ui, "", |ui| {
+                                ui.add_sized([72.0,24.0],egui::Label::new(RichText::new(tr_ui(ui,"Eraser")).color(MUTED).size(11.0)));
                                 ui.add_sized([72.0,24.0],egui::Label::new(RichText::new(tr_ui(ui,"Liquify")).color(MUTED).size(11.0)));
                                 ui.add_sized([72.0,24.0],egui::Label::new(RichText::new(tr_ui(ui,"Marker")).color(MUTED).size(11.0)));
                                 ui.add_sized([72.0,24.0],egui::Label::new(RichText::new(tr_ui(ui,"Round")).color(MUTED).size(11.0)));
@@ -1510,6 +1550,11 @@ impl Studio {
                                 row(ui, if blend==Blend::Base{"First layer"}else{blend.name()}, |ui| {
                                     let defaults = &mut self.preferences.brush_defaults
                                         [blend.shader_id() as usize];
+                                    ui.add_sized(
+                                        [72.0, 30.0],
+                                        egui::DragValue::new(&mut defaults.eraser)
+                                            .range(1.0..=1920.0).speed(1.0).suffix(" px"),
+                                    );
                                     ui.add_sized(
                                         [72.0, 30.0],
                                         egui::DragValue::new(&mut defaults.liquify)
@@ -1581,6 +1626,9 @@ impl Studio {
                                         ui.selectable_value(&mut self.preferences.pause_behavior,PauseBehavior::ReturnToStart,tr_ui(ui,"Return to start"));
                                         ui.selectable_value(&mut self.preferences.pause_behavior,PauseBehavior::KeepPlayhead,tr_ui(ui,"Keep playhead"));
                                     });
+                            });
+                            row(ui, "Follow playback", |ui| {
+                                toggle(ui, &mut self.preferences.timeline_follow);
                             });
                         }
                         4 => {
@@ -1738,6 +1786,13 @@ impl Studio {
         self.ui_change(&before, local_changed, ctx);
     }
 }
+fn followed_start(start: f64, span: f64, time: f64) -> f64 {
+    if time < start {
+        time
+    } else {
+        start.max(time - span * 0.8)
+    }
+}
 fn truncate(value: &str, limit: usize) -> String {
     if value.chars().count() > limit {
         value
@@ -1753,6 +1808,33 @@ fn truncate(value: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn playback_follow_preserves_the_view_until_the_playhead_reaches_its_margin() {
+        assert_eq!(followed_start(0.0, 2.0, 1.0), 0.0);
+        assert!((followed_start(0.0, 2.0, 1.9) - 0.3).abs() < 1e-9);
+        assert_eq!(followed_start(4.0, 2.0, 1.0), 1.0);
+    }
+    #[test]
+    fn brush_wheel_keeps_existing_gestures_and_adds_eraser_below() {
+        let center = Pos2::ZERO;
+        assert_eq!(
+            wheel_choice(center, Pos2::new(0.0, -55.0)),
+            Some(Brush::Ink)
+        );
+        assert_eq!(
+            wheel_choice(center, Pos2::new(50.0, 30.0)),
+            Some(Brush::Marker)
+        );
+        assert_eq!(
+            wheel_choice(center, Pos2::new(-50.0, 30.0)),
+            Some(Brush::Liquify)
+        );
+        assert_eq!(
+            wheel_choice(center, Pos2::new(0.0, 55.0)),
+            Some(Brush::Eraser)
+        );
+        assert_eq!(wheel_choice(center, Pos2::new(0.0, 5.0)), None);
+    }
     #[test]
     fn chinese_catalog_has_renderable_glyphs() {
         let ctx = egui::Context::default();

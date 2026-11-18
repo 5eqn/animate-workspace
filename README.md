@@ -35,12 +35,13 @@ Linux file dialogs use your desktop's XDG Desktop Portal backend. On Windows, us
 
 **P1 — Canvas.** The paper fills the available window at the project's aspect ratio. The brush cursor and a temporary right-button brush wheel are the only drawing controls. The operating system's title bar stays available; fullscreen is your choice.
 
-Hold the right button, move toward an icon and release: up for Round, lower right for Marker, lower left for the Liquify droplet. Release in the center to keep the current brush.
+Hold the right button, move toward an icon and release: up for Round, lower right for Marker, lower left for the Liquify droplet, down for Eraser. Release in the center to keep the current brush.
 
 **P2 — Rhythm and layers.** A preview, audio waveform, tempo starts and layer tracks. Click an empty audio area or drop a file onto it to import music. Right-click to replace or remove it.
 
 ![P2 — music, tempo and vector exposures](docs/screenshots/rhythm.png)
 
+- Playback follows the playhead by default when the timeline is zoomed in. Disable **Playback → Follow playback** to keep the viewport fixed; this preference is saved globally.
 - Click the ruler or tracks to select time. Scroll to pan, pinch or Command / Ctrl + scroll to zoom around the pointer, or drag with the middle button to pan.
 - Double-click the tempo lane to add a start. Drag it to move it; right-click to edit its BPM, time, bars per group and beats per bar. New starts inherit the preceding marker's settings; the first defaults to 2 × 4. The ruler distinguishes beats, bars and groups.
 - Click a layer name to select it; drag it to reorder. Right-click for creation, renaming, visibility, blending, inversion, effects and exposure controls.
@@ -48,7 +49,7 @@ Hold the right button, move toward an icon and release: up for Round, lower righ
 
 Default workspace shortcuts are Option / Alt + 1 and 2; Settings is Command / Ctrl + comma. All shortcuts can be viewed and changed in **Settings → Shortcuts**. Undo and redo default to Command + Z and Command + Shift + Z on macOS, Ctrl + Z and Ctrl + Shift + Z elsewhere. Existing custom bindings are retained.
 
-On macOS, the system application menu includes **Settings…** and its shortcut. Settings has a **Back** control that returns to the previous workspace.
+On macOS, the system application menu includes **Settings…** and its shortcut. The native **File** menu provides New project, Save, Save as and Export video, using the same configurable shortcuts and save confirmation as the workspace. Settings has a **Back** control that returns to the previous workspace.
 
 ## Vector drawing
 
@@ -56,7 +57,9 @@ Round and Marker draw black on white, with pressure controlling diameter. Marker
 
 A tap immediately leaves a mark. Increasing pressure while stationary grows the mark continuously; releasing pressure preserves the ink already drawn. A mouse uses full pressure. macOS reads floating-point pressure and tilt through typed AppKit events using `objc2` and `block2`.
 
-Each layer remembers a separate size for Round, Marker and Liquify. Default sizes for new layers are global preferences, with a larger 240 px Liquify brush. Minimum diameter defaults to zero. Onion skin defaults to three previous and three following exposures, fading with distance.
+Eraser removes every whole stroke touched by its circular footprint on the selected layer, including rapid pointer sweeps. Erasing held content creates a copy at the current time, preserving earlier exposures. Each gesture is one undo step; a miss creates no exposure or undo entry.
+
+Each layer remembers a separate size for Round, Marker, Liquify and Eraser. Default sizes for new layers are global preferences, with a larger 240 px Liquify brush. Minimum diameter defaults to zero. Onion skin defaults to three previous and three following exposures, fading with distance.
 
 ![Brush and pressure preferences](docs/screenshots/brushes.png)
 
@@ -95,7 +98,7 @@ The interface follows the system language by default, using Simplified Chinese o
 
 | Global preferences, saved automatically | Project data, saved in `.mori` |
 | --- | --- |
-| Language, shortcuts, picture offset, pause behavior | Canvas aspect, music, tempo starts and beat grouping |
+| Language, shortcuts, picture offset, pause behavior, timeline follow | Canvas aspect, music, tempo starts and beat grouping |
 | Onion skin, pressure curve, sampling, interpolation, Liquify strength | Current grid, duration, watermark toggle |
 | New-project defaults and per-brush default sizes | Layer order, modes, inversion, styles, effect amount |
 | Export width, FPS, CRF and audio toggle | Per-layer brush sizes, strokes, exposures, export range |
@@ -128,6 +131,7 @@ Desktop checks require Pillow and xdotool; the file-drop check also requires pyt
 ```sh
 MORI_BINARY=target/release/mori xvfb-run -a -s '-screen 0 1440x960x24' python3 scripts/ui-smoke.py
 MORI_BINARY=target/release/mori xvfb-run -a -s '-screen 0 1440x960x24' python3 scripts/ui-language-smoke.py
+MORI_BINARY=target/release/mori xvfb-run -a -s '-screen 0 1440x960x24' python3 scripts/ui-erase-follow-smoke.py
 MORI_BINARY=target/release/mori xvfb-run -a -s '-screen 0 1440x960x24' python3 scripts/ui-drop-smoke.py
 ```
 
