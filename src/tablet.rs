@@ -1,48 +1,126 @@
-//! egui supplies touch force where available. AppKit's local event monitor adds
-//! native tablet pressure on macOS without changing event delivery to winit.
+//! Native tablet event decoding. Each NSEvent accessor is used only on the
+//! event types for which AppKit defines it; proximity has no subtype/pressure.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PenState {
+    active: bool,
+    pressure: f32,
+}
+#[cfg(any(target_os = "macos", test))]
+impl Default for PenState {
+    fn default() -> Self {
+        Self {
+            active: false,
+            pressure: 1.0,
+        }
+    }
+}
+#[cfg(any(target_os = "macos", test))]
+trait TabletEvent {
+    fn kind(&self) -> usize;
+    fn subtype(&self) -> i16;
+    fn pressure(&self) -> f32;
+    fn entering(&self) -> bool;
+}
+#[cfg(any(target_os = "macos", test))]
+fn decode(event: &impl TabletEvent) -> Option<PenState> {
+    match event.kind() {
+        24 => Some(if event.entering() {
+            PenState {
+                active: true,
+                pressure: 0.0,
+            }
+        } else {
+            PenState::default()
+        }),
+        23 => Some(PenState {
+            active: true,
+            pressure: event.pressure().clamp(0.0, 1.0),
+        }),
+        1 | 2 | 5 | 6 => match event.subtype() {
+            1 => Some(PenState {
+                active: true,
+                pressure: event.pressure().clamp(0.0, 1.0),
+            }),
+            2 => Some(if event.entering() {
+                PenState {
+                    active: true,
+                    pressure: 0.0,
+                }
+            } else {
+                PenState::default()
+            }),
+            _ => Some(PenState::default()),
+        },
+        _ => None,
+    }
+}
 #[cfg(target_os = "macos")]
-#[allow(unexpected_cfgs)]
 mod mac {
-    use objc::{class, msg_send, runtime::Object, sel, sel_impl};
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-    static ACTIVE: AtomicBool = AtomicBool::new(false);
-    static PRESSURE: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
+    use super::*;
+    use block2::RcBlock;
+    use objc2::{rc::Retained, runtime::AnyObject};
+    use objc2_app_kit::{NSEvent, NSEventMask};
+    use std::{cell::Cell, ptr::NonNull, rc::Rc};
+    impl TabletEvent for NSEvent {
+        fn kind(&self) -> usize {
+            self.r#type().0
+        }
+        fn subtype(&self) -> i16 {
+            self.subtype().0
+        }
+        fn pressure(&self) -> f32 {
+            self.pressure()
+        }
+        fn entering(&self) -> bool {
+            self.isEnteringProximity()
+        }
+    }
     pub struct Tablet {
-        monitor: *mut Object,
+        monitor: Option<Retained<AnyObject>>,
+        state: Rc<Cell<PenState>>,
+        _handler: RcBlock<dyn Fn(NonNull<NSEvent>) -> *mut NSEvent>,
     }
     impl Tablet {
         pub fn new(ctx: eframe::egui::Context) -> Self {
-            unsafe {
-                let handler = block::ConcreteBlock::new(move |event: *mut Object| -> *mut Object {
-                    let kind: usize = msg_send![event, type];
-                    let subtype: i16 = msg_send![event, subtype];
-                    if kind == 23 || subtype == 1 {
-                        let value: f32 = msg_send![event, pressure];
-                        PRESSURE.store(value.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
-                        ACTIVE.store(true, Ordering::Relaxed);
-                    } else if kind == 1 || kind == 5 || kind == 6 {
-                        ACTIVE.store(false, Ordering::Relaxed);
+            let state = Rc::new(Cell::new(PenState::default()));
+            let observed = state.clone();
+            let handler: RcBlock<dyn Fn(NonNull<NSEvent>) -> *mut NSEvent> =
+                RcBlock::new(move |event: NonNull<NSEvent>| {
+                    // AppKit supplies a live NSEvent and runs this local monitor on the UI thread.
+                    let event_ref = unsafe { event.as_ref() };
+                    if let Some(next) = decode(event_ref) {
+                        observed.set(next);
+                        ctx.request_repaint();
                     }
-                    ctx.request_repaint();
-                    event
-                })
-                .copy();
-                let mask: usize = (1 << 1) | (1 << 2) | (1 << 5) | (1 << 6) | (1 << 23) | (1 << 24);
-                let monitor: *mut Object = msg_send![class!(NSEvent),addLocalMonitorForEventsMatchingMask:mask handler:&*handler];
-                // NSEvent retains the copied block until removeMonitor.
-                Self { monitor }
+                    event.as_ptr()
+                });
+            let mask = NSEventMask::LeftMouseDown
+                | NSEventMask::LeftMouseUp
+                | NSEventMask::MouseMoved
+                | NSEventMask::LeftMouseDragged
+                | NSEventMask::TabletPoint
+                | NSEventMask::TabletProximity;
+            // Returning the original pointer leaves normal winit event delivery intact.
+            let monitor =
+                unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &handler) };
+            Self {
+                monitor,
+                state,
+                _handler: handler,
             }
         }
         pub fn pressure(&self) -> Option<f32> {
-            ACTIVE
-                .load(Ordering::Relaxed)
-                .then(|| f32::from_bits(PRESSURE.load(Ordering::Relaxed)))
+            let state = self.state.get();
+            state.active.then_some(state.pressure)
         }
     }
     impl Drop for Tablet {
         fn drop(&mut self) {
-            unsafe {
-                let _: () = msg_send![class!(NSEvent),removeMonitor:self.monitor];
+            if let Some(monitor) = &self.monitor {
+                unsafe {
+                    NSEvent::removeMonitor(monitor);
+                }
             }
         }
     }
@@ -58,5 +136,85 @@ impl Tablet {
     }
     pub fn pressure(&self) -> Option<f32> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct Event {
+        kind: usize,
+        subtype: Option<i16>,
+        pressure: Option<f32>,
+        entering: Option<bool>,
+    }
+    impl TabletEvent for Event {
+        fn kind(&self) -> usize {
+            self.kind
+        }
+        fn subtype(&self) -> i16 {
+            self.subtype.expect("Invalid NSEvent subtype accessor")
+        }
+        fn pressure(&self) -> f32 {
+            self.pressure.expect("Invalid NSEvent pressure accessor")
+        }
+        fn entering(&self) -> bool {
+            self.entering.expect("Invalid NSEvent proximity accessor")
+        }
+    }
+    #[test]
+    fn huion_proximity_enter_and_exit_never_read_subtype_or_pressure() {
+        for entering in [true, false] {
+            let state = decode(&Event {
+                kind: 24,
+                subtype: None,
+                pressure: None,
+                entering: Some(entering),
+            })
+            .unwrap();
+            assert_eq!(state.active, entering);
+        }
+    }
+    #[test]
+    fn tablet_points_and_stationary_pressure_do_not_read_mouse_subtype() {
+        for pressure in [0.0, 0.1, 0.5, 1.0, 0.0] {
+            let state = decode(&Event {
+                kind: 23,
+                subtype: None,
+                pressure: Some(pressure),
+                entering: None,
+            })
+            .unwrap();
+            assert_eq!(state.pressure, pressure);
+        }
+    }
+    #[test]
+    fn real_mouse_does_not_read_tablet_only_properties() {
+        let state = decode(&Event {
+            kind: 1,
+            subtype: Some(0),
+            pressure: None,
+            entering: None,
+        })
+        .unwrap();
+        assert_eq!(state, PenState::default());
+        let state = decode(&Event {
+            kind: 6,
+            subtype: Some(1),
+            pressure: Some(0.3),
+            entering: None,
+        })
+        .unwrap();
+        assert_eq!(state.pressure, 0.3);
+    }
+    #[test]
+    fn unrelated_events_do_not_read_any_specialized_properties() {
+        assert!(decode(&Event {
+            kind: 10,
+            subtype: None,
+            pressure: None,
+            entering: None
+        })
+        .is_none());
     }
 }
