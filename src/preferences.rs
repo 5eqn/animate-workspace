@@ -1,4 +1,7 @@
-use crate::model::*;
+use crate::{
+    i18n::{self, Language},
+    model::*,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -57,6 +60,7 @@ impl PauseBehavior {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
+    pub language: Language,
     pub onion: Onion,
     pub pressure_gamma: f32,
     pub minimum_pressure: f32,
@@ -76,6 +80,7 @@ pub struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
+            language: Language::System,
             onion: Onion::default(),
             pressure_gamma: 1.0,
             minimum_pressure: 0.0,
@@ -98,6 +103,40 @@ impl Default for Preferences {
     }
 }
 impl Preferences {
+    pub fn migrate_shortcuts(&mut self) {
+        let legacy = |action: &str, key: &str| {
+            self.bindings.iter().any(|b| {
+                b.action == action && b.key == key && !b.command && !b.control && !b.alt && !b.shift
+            })
+        };
+        if legacy("Undo", "Z") && legacy("Redo", "Y") {
+            let defaults = default_bindings();
+            for action in ["Undo", "Redo"] {
+                let candidate = defaults.iter().find(|b| b.action == action).unwrap();
+                if self.bindings.iter().any(|b| {
+                    b.action != action
+                        && b.key == candidate.key
+                        && b.command == candidate.command
+                        && b.control == candidate.control
+                        && b.alt == candidate.alt
+                        && b.shift == candidate.shift
+                }) {
+                    return;
+                }
+            }
+            for action in ["Undo", "Redo"] {
+                *self
+                    .bindings
+                    .iter_mut()
+                    .find(|b| b.action == action)
+                    .unwrap() = defaults
+                    .iter()
+                    .find(|b| b.action == action)
+                    .unwrap()
+                    .clone();
+            }
+        }
+    }
     pub fn layer(&self, name: &str, blend: Blend) -> Layer {
         let defaults = &self.brush_defaults[blend.shader_id() as usize];
         let mut layer = Layer::new(name, blend, defaults.ink);
@@ -123,6 +162,12 @@ impl Preferences {
             self.layer("Movement", Blend::Move),
             self.layer("Atmosphere", Blend::Blur),
         ];
+        if self.language.chinese(&i18n::system_locale()) {
+            document.name = i18n::translate(true, "Untitled motion").into_owned();
+            for layer in &mut document.layers {
+                layer.name = i18n::translate(true, &layer.name).into_owned();
+            }
+        }
         document
     }
     pub fn apply_output(&self, output: &mut ExportSettings) {
@@ -164,6 +209,21 @@ impl Preferences {
                 .bindings
                 .iter()
                 .all(|b| eframe::egui::Key::from_name(&b.key).is_some())
+            && self.bindings.iter().enumerate().all(|(i, b)| {
+                self.bindings[i + 1..].iter().all(|other| {
+                    b.action != other.action
+                        && !(b.key == other.key
+                            && b.control == other.control
+                            && b.command == other.command
+                            && b.alt == other.alt
+                            && b.shift == other.shift)
+                })
+            })
+            && default_bindings()
+                .iter()
+                .all(|required| self.bindings.iter().any(|b| b.action == required.action))
+            && self.onion.previous <= 12
+            && self.onion.next <= 12
     }
 }
 pub struct PreferenceStore {
@@ -181,6 +241,7 @@ impl PreferenceStore {
                 Ok(mut p) if p.valid() => {
                     p.bindings
                         .retain(|b| !matches!(b.action.as_str(), "Fit" | "Liquify"));
+                    p.migrate_shortcuts();
                     p
                 }
                 _ => {
@@ -214,6 +275,46 @@ impl PreferenceStore {
         self.last = bytes;
         Ok(())
     }
+}
+#[derive(Serialize, Deserialize)]
+struct PreferenceBundle {
+    format: String,
+    version: u32,
+    preferences: Preferences,
+}
+pub fn export_settings(path: &Path, preferences: &Preferences) -> Result<(), String> {
+    if !preferences.valid() {
+        return Err("Preferences are invalid".into());
+    }
+    let bundle = PreferenceBundle {
+        format: "mori.preferences".into(),
+        version: 1,
+        preferences: preferences.clone(),
+    };
+    let bytes = serde_json::to_vec_pretty(&bundle).map_err(|e| e.to_string())?;
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
+    file.write_all(&bytes).map_err(|e| e.to_string())?;
+    file.as_file().sync_all().map_err(|e| e.to_string())?;
+    file.persist(path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+pub fn import_settings(path: &Path) -> Result<Preferences, String> {
+    let bytes = fs::read(path).map_err(|e| e.to_string())?;
+    let mut bundle: PreferenceBundle =
+        serde_json::from_slice(&bytes).map_err(|_| "Invalid settings file".to_owned())?;
+    if bundle.format != "mori.preferences" || bundle.version != 1 {
+        return Err("Unsupported settings format".into());
+    }
+    bundle
+        .preferences
+        .bindings
+        .retain(|b| !matches!(b.action.as_str(), "Fit" | "Liquify"));
+    bundle.preferences.migrate_shortcuts();
+    if !bundle.preferences.valid() {
+        return Err("Preferences are invalid".into());
+    }
+    Ok(bundle.preferences)
 }
 fn config_path() -> PathBuf {
     if let Some(path) = std::env::var_os("MORI_PREFERENCES_PATH") {
@@ -354,5 +455,87 @@ mod new_default_tests {
         assert!(!p.new_document().settings.watermark);
         assert_eq!(doc.layers[1].brush_width(Brush::Marker), 78.0);
         assert_eq!(doc.layers[1].brush_width(Brush::Ink), 42.0);
+    }
+}
+
+#[cfg(test)]
+mod settings_transfer_tests {
+    use super::*;
+    #[test]
+    fn settings_export_import_roundtrips_all_preferences_and_not_project_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut preferences = Preferences {
+            language: Language::Chinese,
+            video_delay_ms: -77.0,
+            minimum_pressure: 0.12,
+            ..Default::default()
+        };
+        preferences.brush_defaults[0].marker = 87.0;
+        preferences.onion.before = [10, 20, 30];
+        preferences.pause_behavior = PauseBehavior::KeepPlayhead;
+        export_settings(&path, &preferences).unwrap();
+        let imported = import_settings(&path).unwrap();
+        assert_eq!(
+            serde_json::to_value(&preferences).unwrap(),
+            serde_json::to_value(&imported).unwrap()
+        );
+        let bytes = fs::read_to_string(&path).unwrap();
+        assert!(!bytes.contains("\"cels\"") && !bytes.contains("\"tempos\""));
+        let mut project = Document::default();
+        project.layers[0].width = 52.0;
+        let before = serde_json::to_value(&project).unwrap();
+        let _global = import_settings(&path).unwrap();
+        assert_eq!(serde_json::to_value(project).unwrap(), before);
+    }
+    #[test]
+    fn import_rejects_unknown_format_invalid_numbers_and_conflicting_bindings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let preferences = Preferences::default();
+        export_settings(&path, &preferences).unwrap();
+        let original: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        for update in ["format", "spacing", "bindings"] {
+            let mut json = original.clone();
+            match update {
+                "format" => json["version"] = 999.into(),
+                "spacing" => json["preferences"]["spacing"] = 0.into(),
+                _ => {
+                    json["preferences"]["bindings"][1] = json["preferences"]["bindings"][0].clone();
+                }
+            }
+            fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+            assert!(import_settings(&path).is_err());
+        }
+        fs::write(&path, b"{}").unwrap();
+        assert!(import_settings(&path).is_err());
+    }
+    #[test]
+    fn old_shipped_undo_bindings_migrate_and_custom_shortcuts_stay_unchanged() {
+        let mut p = Preferences::default();
+        let undo = p.bindings.iter_mut().find(|b| b.action == "Undo").unwrap();
+        undo.command = false;
+        let redo = p.bindings.iter_mut().find(|b| b.action == "Redo").unwrap();
+        redo.key = "Y".into();
+        redo.command = false;
+        redo.shift = false;
+        p.migrate_shortcuts();
+        assert!(
+            p.bindings
+                .iter()
+                .find(|b| b.action == "Undo")
+                .unwrap()
+                .command
+        );
+        let redo = p.bindings.iter().find(|b| b.action == "Redo").unwrap();
+        assert_eq!(redo.key, "Z");
+        assert!(redo.command && redo.shift);
+        let undo = p.bindings.iter_mut().find(|b| b.action == "Undo").unwrap();
+        undo.key = "U".into();
+        undo.alt = true;
+        let customized = serde_json::to_value(&p).unwrap();
+        p.migrate_shortcuts();
+        assert_eq!(serde_json::to_value(&p).unwrap(), customized);
     }
 }

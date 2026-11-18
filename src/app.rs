@@ -2,7 +2,9 @@ use crate::{
     audio::{DecodedAudio, Transport},
     curve::StrokeSmoother,
     export::ExportJob,
+    i18n::{self, Language},
     model::*,
+    native_menu::NativeMenu,
     preferences::{PauseBehavior, PreferenceStore, Preferences},
     project,
     render::{self, Ghost, Renderer, View},
@@ -59,6 +61,9 @@ pub struct Studio {
     history: History,
     preferences: Preferences,
     preference_store: PreferenceStore,
+    native_menu: NativeMenu,
+    system_locale: String,
+    reset_preferences: bool,
     settings_tab: usize,
     layer_scroll: f32,
     page: Page,
@@ -97,12 +102,18 @@ pub struct Studio {
     smoke_started: Instant,
 }
 fn text(ui: &mut egui::Ui, s: impl Into<String>, size: f32, color: Color32) {
-    ui.label(RichText::new(s).size(size).color(color));
+    ui.label(
+        RichText::new(i18n::tr(ui.ctx(), s.into()))
+            .size(size)
+            .color(color),
+    );
 }
 impl Studio {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         ui::configure(&cc.egui_ctx);
         let (preference_store, preferences, warning) = PreferenceStore::open();
+        let system_locale = i18n::system_locale();
+        i18n::use_language(&cc.egui_ctx, preferences.language, &system_locale);
         let renderer = Arc::new(Mutex::new(unsafe {
             Renderer::new(cc.gl.as_ref().expect("OpenGL renderer"))
                 .expect("GPU shaders must compile")
@@ -118,6 +129,9 @@ impl Studio {
             doc: preferences.new_document(),
             preferences,
             preference_store,
+            native_menu: NativeMenu::new(cc.egui_ctx.clone()),
+            system_locale,
+            reset_preferences: false,
             settings_tab: 0,
             layer_scroll: 0.0,
             history: History::default(),
@@ -172,6 +186,38 @@ impl Studio {
     }
     fn fail(&mut self, message: impl Into<String>) {
         self.error = Some(message.into());
+    }
+    fn translated(&self, text: &str) -> String {
+        i18n::translate(self.preferences.language.chinese(&self.system_locale), text).into_owned()
+    }
+    fn export_preferences(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title(self.translated("Export settings…"))
+            .add_filter(self.translated("Settings file"), &["json"])
+            .set_file_name("mori-settings.json")
+            .save_file()
+        {
+            match crate::preferences::export_settings(&path, &self.preferences) {
+                Ok(()) => self.notify("Settings exported"),
+                Err(error) => self.fail(error),
+            }
+        }
+    }
+    fn import_preferences(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title(self.translated("Import settings…"))
+            .add_filter(self.translated("Settings file"), &["json"])
+            .pick_file()
+        {
+            match crate::preferences::import_settings(&path) {
+                Ok(preferences) => {
+                    self.preferences = preferences;
+                    self.bind_capture = None;
+                    self.notify("Settings transferred");
+                }
+                Err(error) => self.fail(error),
+            }
+        }
     }
     fn record(&mut self) {
         self.history.record(&self.doc);
@@ -268,7 +314,7 @@ impl Studio {
         }
     }
     fn keyboard(&mut self, ctx: &egui::Context) {
-        if self.pending.is_some() || self.background.is_some() {
+        if self.pending.is_some() || self.background.is_some() || self.reset_preferences {
             return;
         }
         let events = ctx.input(|i| i.events.clone());
@@ -305,7 +351,11 @@ impl Studio {
                         })
                         .map(|(_, b)| b.action.clone());
                     if let Some(action) = conflict {
-                        self.notify(format!("Already used by {action}"));
+                        self.notify(format!(
+                            "{} {}",
+                            self.translated("Already used by"),
+                            self.translated(&action)
+                        ));
                     } else {
                         let binding = &mut self.preferences.bindings[index];
                         binding.key = name;
@@ -342,6 +392,9 @@ impl Studio {
                     })
                     .map(|b| b.action.clone());
                 if let Some(action) = action {
+                    if ctx.wants_keyboard_input() && matches!(action.as_str(), "Undo" | "Redo") {
+                        continue;
+                    }
                     if !repeat
                         || matches!(
                             action.as_str(),
@@ -423,7 +476,7 @@ impl Studio {
             }
             Pending::Open => {
                 if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("MORI project", &["mori"])
+                    .add_filter(self.translated("MORI project"), &["mori"])
                     .pick_file()
                 {
                     self.open_path(path);
@@ -457,7 +510,7 @@ impl Studio {
         }
         let path = if save_as || self.path.is_none() {
             rfd::FileDialog::new()
-                .add_filter("MORI project", &["mori"])
+                .add_filter(self.translated("MORI project"), &["mori"])
                 .set_file_name(format!("{}.mori", self.doc.name))
                 .save_file()
         } else {
@@ -476,7 +529,10 @@ impl Studio {
     }
     fn import_audio(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Music", &["wav", "mp3", "flac", "ogg", "m4a", "aac"])
+            .add_filter(
+                self.translated("Music"),
+                &["wav", "mp3", "flac", "ogg", "m4a", "aac"],
+            )
             .pick_file()
         {
             self.import_audio_path(path);
@@ -818,7 +874,7 @@ impl Studio {
     fn start_export(&mut self) {
         self.transport.stop();
         if let Some(path) = rfd::FileDialog::new()
-            .add_filter("MP4 video", &["mp4"])
+            .add_filter(self.translated("MP4 video"), &["mp4"])
             .set_file_name(format!("{}.mp4", self.doc.name))
             .save_file()
         {
@@ -886,14 +942,18 @@ impl Studio {
                 }
             }
             match result {
-                Ok(path) => self.notify(format!("Video saved · {}", path.display())),
+                Ok(path) => self.notify(format!(
+                    "{} · {}",
+                    self.translated("Video saved"),
+                    path.display()
+                )),
                 Err(e) => self.fail(e),
             }
         }
     }
     fn confirmation(&mut self, ctx: &egui::Context) {
         if let Some(pending) = self.pending {
-            egui::Window::new("Save your motion?")
+            egui::Window::new(self.translated("Save your motion?"))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
@@ -911,23 +971,26 @@ impl Studio {
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         if ui
-                            .add_enabled(self.dirty, egui::Button::new("Save & continue"))
+                            .add_enabled(
+                                self.dirty,
+                                egui::Button::new(self.translated("Save & continue")),
+                            )
                             .clicked()
                         {
                             self.save(false);
                         }
                         if ui
-                            .button(if self.dirty {
+                            .button(self.translated(if self.dirty {
                                 "Discard changes"
                             } else {
                                 "Stop export & close"
-                            })
+                            }))
                             .clicked()
                         {
                             self.pending = None;
                             self.perform(pending);
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.button(self.translated("Cancel")).clicked() {
                             self.pending = None;
                         }
                     });
@@ -1542,6 +1605,23 @@ impl Studio {
 }
 impl eframe::App for Studio {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let language_at_frame_start = self.preferences.language;
+        i18n::use_language(ctx, self.preferences.language, &self.system_locale);
+        let chinese = self.preferences.language.chinese(&self.system_locale);
+        self.native_menu.sync(
+            chinese,
+            self.preferences
+                .bindings
+                .iter()
+                .find(|b| b.action == "Settings"),
+        );
+        if self.native_menu.take_settings() {
+            if self.page != Page::Settings {
+                self.return_page = self.page;
+            }
+            self.page = Page::Settings;
+            self.brush_wheel = None;
+        }
         self.poll_background();
         if let Some(error) = self.transport.take_error() {
             self.time = self.doc.timing.snap(self.transport.position());
@@ -1588,7 +1668,7 @@ impl eframe::App for Studio {
             rfd::MessageDialog::new()
                 .set_title("MORI")
                 .set_level(rfd::MessageLevel::Error)
-                .set_description(error)
+                .set_description(self.translated(&error))
                 .show();
         }
         if self.page != Page::Canvas {
@@ -1596,6 +1676,9 @@ impl eframe::App for Studio {
         }
         if let Err(error) = self.preference_store.save_if_changed(&self.preferences) {
             self.notify(error);
+        }
+        if self.preferences.language != language_at_frame_start {
+            ctx.request_repaint();
         }
         if self.busy.is_some() {
             ctx.set_cursor_icon(egui::CursorIcon::Wait);

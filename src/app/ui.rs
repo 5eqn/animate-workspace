@@ -1,4 +1,7 @@
 use super::*;
+fn tr_ui(ui: &egui::Ui, text: impl AsRef<str>) -> String {
+    i18n::tr(ui.ctx(), text)
+}
 use egui::scroll_area::ScrollBarVisibility;
 use egui::{epaint::PathShape, Align2, Id, PointerButton, TextStyle};
 
@@ -16,6 +19,19 @@ pub(super) fn configure(ctx: &egui::Context) {
         .get_mut(&egui::FontFamily::Proportional)
         .unwrap()
         .insert(0, "Inter".into());
+    fonts.font_data.insert(
+        "NotoSansSC".into(),
+        Arc::new(egui::FontData::from_static(include_bytes!(
+            "../../assets/fonts/NotoSansSC.otf"
+        ))),
+    );
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts
+            .families
+            .get_mut(&family)
+            .unwrap()
+            .push("NotoSansSC".into());
+    }
     ctx.set_fonts(fonts);
     let mut style = (*ctx.style()).clone();
     style.visuals = egui::Visuals::dark();
@@ -98,6 +114,22 @@ fn hairline(p: &egui::Painter, rect: Rect, y: f32) {
     p.hline(rect.x_range(), y, UiStroke::new(1.0_f32, LINE));
 }
 fn label(
+    p: &egui::Painter,
+    pos: Pos2,
+    align: Align2,
+    value: impl ToString,
+    size: f32,
+    color: Color32,
+) {
+    p.text(
+        pos,
+        align,
+        i18n::tr(p.ctx(), value.to_string()),
+        FontId::proportional(size),
+        color,
+    );
+}
+fn label_raw(
     p: &egui::Painter,
     pos: Pos2,
     align: Align2,
@@ -283,18 +315,14 @@ fn brush_icon(p: &egui::Painter, c: Pos2, brush: Brush, color: Color32) {
             p.add(egui::Shape::convex_polygon(corners, color, UiStroke::NONE));
         }
         Brush::Liquify => {
-            for offset in [-5.0, 0.0, 5.0] {
-                let points = (0..=24)
-                    .map(|i| {
-                        let t = i as f32 / 24.0;
-                        Pos2::new(
-                            c.x - 11.0 + t * 22.0,
-                            c.y + offset + (t * std::f32::consts::TAU).sin() * 2.8,
-                        )
-                    })
-                    .collect();
-                p.add(PathShape::line(points, UiStroke::new(1.4_f32, color)));
+            let mut points = vec![c + Vec2::new(0.0, -12.0)];
+            for i in 0..=32 {
+                // Tangents from the pointed tip to the circular body.
+                let tangent = (8.0_f32 / 15.0).asin();
+                let angle = -tangent + i as f32 / 32.0 * (std::f32::consts::PI + 2.0 * tangent);
+                points.push(c + Vec2::new(angle.cos() * 8.0, 3.0 + angle.sin() * 8.0));
             }
+            p.add(egui::Shape::convex_polygon(points, color, UiStroke::NONE));
         }
     }
 }
@@ -660,7 +688,7 @@ impl Studio {
                 );
             }
             if let Some(asset) = &self.doc.audio {
-                label(
+                label_raw(
                     &p,
                     Pos2::new(rect.left(), wave.center().y),
                     Align2::LEFT_CENTER,
@@ -714,17 +742,20 @@ impl Studio {
         wave_response.context_menu(|ui| {
             menu_surface(ui);
             if ui
-                .button(if self.doc.audio.is_some() {
-                    "Replace audio…"
-                } else {
-                    "Import audio…"
-                })
+                .button(tr_ui(
+                    ui,
+                    if self.doc.audio.is_some() {
+                        "Replace audio…"
+                    } else {
+                        "Import audio…"
+                    },
+                ))
                 .clicked()
             {
                 import = true;
                 ui.close_menu();
             }
-            if self.doc.audio.is_some() && ui.button("Remove audio").clicked() {
+            if self.doc.audio.is_some() && ui.button(tr_ui(ui, "Remove audio")).clicked() {
                 remove_audio = true;
                 ui.close_menu();
             }
@@ -817,7 +848,7 @@ impl Studio {
                                 .suffix(" s"),
                         )
                         .changed();
-                    if ui.button("Remove start").clicked() {
+                    if ui.button(tr_ui(ui, "Remove start")).clicked() {
                         remove_tempo = Some(i);
                         ui.close_menu();
                     }
@@ -836,12 +867,12 @@ impl Studio {
         }
         response.context_menu(|ui| {
             menu_surface(ui);
-            if ui.button("Add tempo start").clicked() {
+            if ui.button(tr_ui(ui, "Add tempo start")).clicked() {
                 add_tempo = Some(self.time);
                 ui.close_menu();
             }
             ui.horizontal(|ui| {
-                ui.label("Grid");
+                ui.label(tr_ui(ui, "Grid"));
                 changed |= step_control(ui, &mut self.doc.timing.step);
             });
         });
@@ -919,7 +950,7 @@ impl Studio {
         );
         background.context_menu(|ui| {
             menu_surface(ui);
-            if ui.button("New layer").clicked() {
+            if ui.button(tr_ui(ui, "New layer")).clicked() {
                 create = true;
                 ui.close_menu();
             }
@@ -944,7 +975,7 @@ impl Studio {
                     UiStroke::new(2.0_f32, ACCENT),
                 );
             }
-            label(
+            label_raw(
                 &p,
                 Pos2::new(rect.left() + 16.0, y + HEIGHT * 0.5),
                 Align2::LEFT_CENTER,
@@ -1115,11 +1146,15 @@ impl Studio {
                         menu_row(ui, "Blend", |ui| {
                             egui::ComboBox::from_id_salt(("blend", i))
                                 .width(124.0)
-                                .selected_text(layer.blend.name())
+                                .selected_text(tr_ui(ui, layer.blend.name()))
                                 .show_ui(ui, |ui| {
                                     for blend in Blend::OVERLAYS {
                                         if ui
-                                            .selectable_value(&mut layer.blend, blend, blend.name())
+                                            .selectable_value(
+                                                &mut layer.blend,
+                                                blend,
+                                                tr_ui(ui, blend.name()),
+                                            )
                                             .changed()
                                         {
                                             changed = true;
@@ -1150,11 +1185,15 @@ impl Studio {
                         menu_row(ui, "Style", |ui| {
                             egui::ComboBox::from_id_salt(("style", i))
                                 .width(124.0)
-                                .selected_text(layer.style.name())
+                                .selected_text(tr_ui(ui, layer.style.name()))
                                 .show_ui(ui, |ui| {
                                     for style in Style::ALL {
                                         changed |= ui
-                                            .selectable_value(&mut layer.style, style, style.name())
+                                            .selectable_value(
+                                                &mut layer.style,
+                                                style,
+                                                tr_ui(ui, style.name()),
+                                            )
                                             .changed();
                                     }
                                 });
@@ -1162,11 +1201,11 @@ impl Studio {
                     }
                     ui.add_space(5.0);
                     ui.separator();
-                    if ui.button("New layer").clicked() {
+                    if ui.button(tr_ui(ui, "New layer")).clicked() {
                         create = true;
                         ui.close_menu();
                     }
-                    if ui.button("Blank exposure").clicked() {
+                    if ui.button(tr_ui(ui, "Blank exposure")).clicked() {
                         layer.cels.insert(tick(self.time), Arc::default());
                         changed = true;
                         ui.close_menu();
@@ -1174,7 +1213,7 @@ impl Studio {
                     if ui
                         .add_enabled(
                             layer.cels.contains_key(&tick(self.time)),
-                            egui::Button::new("Remove exposure"),
+                            egui::Button::new(tr_ui(ui, "Remove exposure")),
                         )
                         .clicked()
                     {
@@ -1185,7 +1224,7 @@ impl Studio {
                     if can_delete
                         && ui
                             .button(
-                                RichText::new("Delete layer")
+                                RichText::new(tr_ui(ui, "Delete layer"))
                                     .color(Color32::from_rgb(211, 143, 151)),
                             )
                             .clicked()
@@ -1211,10 +1250,10 @@ impl Studio {
             changed = true;
         }
         if create {
-            self.doc.layers.push(
-                self.preferences
-                    .layer(&format!("Layer {}", self.doc.layers.len() + 1), Blend::Xor),
-            );
+            let name = format!("{} {}", self.translated("Layer"), self.doc.layers.len() + 1);
+            self.doc
+                .layers
+                .push(self.preferences.layer(&name, Blend::Xor));
             self.layer = self.doc.layers.len() - 1;
             changed = true;
         }
@@ -1255,6 +1294,7 @@ impl Studio {
             "Playback",
             "Export",
             "Shortcuts",
+            "General",
         ];
         let back = Rect::from_min_size(
             sidebar.min + Vec2::new(24.0, 38.0),
@@ -1431,25 +1471,22 @@ impl Studio {
                             });
                             row(ui, "Sample spacing", |ui| {
                                 ui.add(egui::DragValue::new(&mut self.preferences.spacing).range(0.25..=8.0).speed(0.2).max_decimals(2).suffix(" px"))
-                                    .on_hover_text("Maximum distance between generated curve points, in canvas pixels.");
+                                    .on_hover_text(tr_ui(ui,"Maximum distance between generated curve points, in canvas pixels."));
                             });
                             row(ui, "Interpolation", |ui| {
                                 egui::ComboBox::from_id_salt("interpolation")
-                                    .selected_text(match self.preferences.interpolation {
-                                        Interpolation::Linear => "Linear",
-                                        Interpolation::Smooth => "Smooth",
-                                    })
+                                    .selected_text(tr_ui(ui,match self.preferences.interpolation{Interpolation::Linear=>"Linear",Interpolation::Smooth=>"Smooth"}))
                                     .width(120.0)
                                     .show_ui(ui, |ui| {
                                         ui.selectable_value(
                                             &mut self.preferences.interpolation,
                                             Interpolation::Linear,
-                                            "Linear",
+                                            tr_ui(ui,"Linear"),
                                         );
                                         ui.selectable_value(
                                             &mut self.preferences.interpolation,
                                             Interpolation::Smooth,
-                                            "Smooth",
+                                            tr_ui(ui,"Smooth"),
                                         );
                                     });
                             });
@@ -1458,9 +1495,9 @@ impl Studio {
                             });
                             group(ui, "New layer sizes");
                             row(ui, "", |ui| {
-                                ui.add_sized([72.0,24.0],egui::Label::new(RichText::new("Liquify").color(MUTED).size(11.0)));
-                                ui.add_sized([72.0,24.0],egui::Label::new(RichText::new("Marker").color(MUTED).size(11.0)));
-                                ui.add_sized([72.0,24.0],egui::Label::new(RichText::new("Round").color(MUTED).size(11.0)));
+                                ui.add_sized([72.0,24.0],egui::Label::new(RichText::new(tr_ui(ui,"Liquify")).color(MUTED).size(11.0)));
+                                ui.add_sized([72.0,24.0],egui::Label::new(RichText::new(tr_ui(ui,"Marker")).color(MUTED).size(11.0)));
+                                ui.add_sized([72.0,24.0],egui::Label::new(RichText::new(tr_ui(ui,"Round")).color(MUTED).size(11.0)));
                             });
                             for blend in [
                                 Blend::Base,
@@ -1540,9 +1577,9 @@ impl Studio {
                                     PauseBehavior::KeepPlayhead=>"Keep playhead",
                                 };
                                 egui::ComboBox::from_id_salt("pause_behavior")
-                                    .width(172.0).selected_text(selected).show_ui(ui, |ui| {
-                                        ui.selectable_value(&mut self.preferences.pause_behavior,PauseBehavior::ReturnToStart,"Return to start");
-                                        ui.selectable_value(&mut self.preferences.pause_behavior,PauseBehavior::KeepPlayhead,"Keep playhead");
+                                    .width(172.0).selected_text(tr_ui(ui,selected)).show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut self.preferences.pause_behavior,PauseBehavior::ReturnToStart,tr_ui(ui,"Return to start"));
+                                        ui.selectable_value(&mut self.preferences.pause_behavior,PauseBehavior::KeepPlayhead,tr_ui(ui,"Keep playhead"));
                                     });
                             });
                         }
@@ -1601,14 +1638,14 @@ impl Studio {
                                             job.frame as f32 / job.frames as f32 * 100.0
                                         )),
                                 );
-                                if ui.button("Cancel export").clicked() {
+                                if ui.button(tr_ui(ui,"Cancel export")).clicked() {
                                     self.export = None;
                                     self.notify("Export cancelled");
                                 }
                             } else if ui
                                 .add_enabled(
                                     self.doc.settings.export.end > self.doc.settings.export.start,
-                                    egui::Button::new(RichText::new("Export video").color(Color32::from_rgb(228,234,247)))
+                                    egui::Button::new(RichText::new(tr_ui(ui,"Export video")).color(Color32::from_rgb(228,234,247)))
                                         .fill(Color32::from_rgb(54,73,107))
                                         .min_size(Vec2::new(160.0, 36.0)),
                                 )
@@ -1617,14 +1654,14 @@ impl Studio {
                                 self.start_export();
                             }
                         }
-                        _ => {
+                        5 => {
                             let mut capture = None;
                             for (i, binding) in self.preferences.bindings.iter().enumerate() {
                                 row(ui, &binding.action, |ui| {
                                     if ui
                                         .button(
                                             RichText::new(if self.bind_capture == Some(i) {
-                                                "Press keys…".into()
+                                                tr_ui(ui,"Press keys…")
                                             } else {
                                                 binding.label()
                                             })
@@ -1646,14 +1683,55 @@ impl Studio {
                                 self.bind_capture = Some(index);
                             }
                             ui.add_space(24.0);
-                            if ui.button("Restore shortcuts").clicked() {
+                            if ui.button(tr_ui(ui,"Restore shortcuts")).clicked() {
                                 self.preferences.bindings = default_bindings();
                                 self.bind_capture = None;
                             }
                         }
+                        _=>{
+                            row(ui,"Language",|ui|{
+                                let selected=match self.preferences.language{Language::System=>"Follow system",Language::English=>"English",Language::Chinese=>"简体中文"};
+                                egui::ComboBox::from_id_salt("language").width(160.0).selected_text(tr_ui(ui,selected)).show_ui(ui,|ui|{
+                                    ui.selectable_value(&mut self.preferences.language,Language::System,tr_ui(ui,"Follow system"));
+                                    ui.selectable_value(&mut self.preferences.language,Language::English,"English");
+                                    ui.selectable_value(&mut self.preferences.language,Language::Chinese,"简体中文");
+                                });
+                            });
+                            ui.add_space(26.0);
+                            if ui.button(tr_ui(ui,"Export settings…")).clicked(){self.export_preferences();}
+                            if ui.button(tr_ui(ui,"Import settings…")).clicked(){self.import_preferences();}
+                            ui.add_space(22.0);
+                            if ui.button(RichText::new(tr_ui(ui,"Restore all defaults…")).color(Color32::from_rgb(211,143,151))).clicked(){self.reset_preferences=true;}
+                        }
+
                     }
                 });
         });
+        if self.reset_preferences {
+            let response = egui::Modal::new(Id::new("restore_preferences"))
+                .frame(egui::Frame::popup(ui.style()).inner_margin(24))
+                .show(ctx, |ui| {
+                    ui.set_width(360.0);
+                    text(ui, "Restore all defaults?", 20.0, INK);
+                    ui.add_space(12.0);
+                    ui.label(tr_ui(ui, "All application preferences will be reset. This project will stay unchanged."));
+                    ui.add_space(20.0);
+                    ui.horizontal(|ui| {
+                        if ui.button(tr_ui(ui, "Cancel")).clicked() {
+                            self.reset_preferences = false;
+                        }
+                        if ui.button(tr_ui(ui, "Restore defaults")).clicked() {
+                            self.preferences = Preferences::default();
+                            self.reset_preferences = false;
+                            self.bind_capture = None;
+                            self.notify("Defaults restored");
+                        }
+                    });
+                });
+            if response.should_close() {
+                self.reset_preferences = false;
+            }
+        }
         if local_changed {
             self.time = self.doc.timing.snap(self.time);
         }
@@ -1675,6 +1753,23 @@ fn truncate(value: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn chinese_catalog_has_renderable_glyphs() {
+        let ctx = egui::Context::default();
+        configure(&ctx);
+        let catalog: std::collections::HashMap<String, String> =
+            serde_json::from_str(include_str!("../../assets/locales/zh-CN.json")).unwrap();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            ctx.fonts(|fonts| {
+                let font = FontId::proportional(13.0);
+                for value in catalog.values() {
+                    for ch in value.chars().filter(|ch| !ch.is_whitespace()) {
+                        assert!(fonts.has_glyph(&font, ch), "Missing UI glyph: {ch}");
+                    }
+                }
+            });
+        });
+    }
     #[test]
     fn native_light_theme_does_not_reset_popup_or_input_colors() {
         let ctx = egui::Context::default();

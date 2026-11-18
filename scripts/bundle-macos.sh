@@ -28,6 +28,8 @@ cat > "$app_path/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIconFile</key><string>MORI.icns</string>
 <key>CFBundleName</key><string>MORI</string>
 <key>CFBundleDisplayName</key><string>MORI</string>
+<key>CFBundleDevelopmentRegion</key><string>en</string>
+<key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string></array>
 <key>CFBundleIdentifier</key><string>studio.mori.animation</string>
 <key>CFBundleExecutable</key><string>MORI</string>
 <key>CFBundlePackageType</key><string>APPL</string>

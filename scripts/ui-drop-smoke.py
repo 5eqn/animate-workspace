@@ -23,7 +23,7 @@ with tempfile.TemporaryDirectory(prefix='mori-drop-') as temp:
     with wave.open(str(audio),'wb') as file:
         file.setnchannels(1);file.setsampwidth(2);file.setframerate(48000)
         file.writeframes(b''.join(struct.pack('<h',int(math.sin(i*440*2*math.pi/48000)*12000)) for i in range(48000)))
-    env=dict(os.environ,MORI_PREFERENCES_PATH=str(temp/'preferences.json'))
+    env=dict(os.environ,MORI_SYSTEM_LOCALE='en-US',MORI_PREFERENCES_PATH=str(temp/'preferences.json'))
     app=subprocess.Popen([str(root/os.environ.get('MORI_BINARY','target/debug/mori')),'--demo'],cwd=root,env=env)
     try:
         time.sleep(1)
@@ -70,6 +70,8 @@ with tempfile.TemporaryDirectory(prefix='mori-drop-') as temp:
         count=sum(85<r<145 and 90<g<155 and 115<b<180 for r,g,b in waveform.getdata())
         assert count>5000,'File drop did not decode and display the waveform'
         assert app.poll() is None
+        time.sleep(4.0)
+        ImageGrab.grab(xdisplay=os.environ['DISPLAY']).save(out/'audio-imported-clean.png')
         connection.close()
         print('Native file drop, audio decoding, waveform and import hover feedback: passed')
     finally:

@@ -70,14 +70,14 @@ def cursor_size():
 
 with tempfile.TemporaryDirectory(prefix='mori-ui-') as temporary:
     prefs=Path(temporary)/'preferences.json'
-    env=dict(os.environ,MORI_PREFERENCES_PATH=str(prefs))
+    env=dict(os.environ,MORI_SYSTEM_LOCALE='en-US',MORI_PREFERENCES_PATH=str(prefs))
     process=start(env)
     try:
         shot('canvas')
         key('alt+2');shot('rhythm')
         subprocess.run(['xdotool','mousemove','800','510'],check=True);time.sleep(.2);shot('import-audio-hover')
         key('ctrl+comma');shot('settings')
-        for i,name in enumerate(['project','brushes','onion','playback','export','shortcuts']):
+        for i,name in enumerate(['project','brushes','onion','playback','export','shortcuts','general']):
             click(90,124+i*48);shot('settings-'+name)
         click(90,124);click(998,567)
         click(72,51)
@@ -105,7 +105,7 @@ with tempfile.TemporaryDirectory(prefix='mori-ui-') as temporary:
         key('Return')
         assert json.loads(prefs.read_text())['video_delay_ms']==-125
         key('alt+1');key('d');click(500,400);shot('tap')
-        key('z');shot('undo');key('y');shot('redo')
+        key('ctrl+z');shot('undo');key('ctrl+shift+z');shot('redo')
         crop=(60,215,1380,755)
         tap=Image.open(out/'tap.png').convert('RGB').crop(crop)
         undo=Image.open(out/'undo.png').convert('RGB').crop(crop)
@@ -121,7 +121,7 @@ with tempfile.TemporaryDirectory(prefix='mori-ui-') as temporary:
         click(140,824)
         created=shot('layer-created')
         assert created.getpixel((35,610))[:3]==(25,27,32), 'New layer was not selected'
-        key('z');key('y')
+        key('ctrl+z');key('ctrl+shift+z')
         subprocess.run(['xdotool','mousemove','100','616','mousedown','1'],check=True)
         time.sleep(.15)
         subprocess.run(['xdotool','mousemove','100','790'],check=True)
@@ -185,7 +185,7 @@ with tempfile.TemporaryDirectory(prefix='mori-ui-') as temporary:
         time.sleep(.15)
         subprocess.run(['xdotool','mouseup','1'],check=True)
         shot('marker-stroke')
-        key('z');key('z')
+        key('ctrl+z');key('ctrl+z')
         key('ctrl+comma');click(90,268);shot('preferences-restored')
         assert json.loads(prefs.read_text())['video_delay_ms']==-125
         click(72,51)
