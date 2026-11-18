@@ -1,8 +1,9 @@
 use crate::{
     audio::{DecodedAudio, Transport},
+    curve::StrokeSmoother,
     export::ExportJob,
     model::*,
-    preferences::{PreferenceStore, Preferences},
+    preferences::{PauseBehavior, PreferenceStore, Preferences},
     project,
     render::{self, Ghost, Renderer, View},
     tablet::Tablet,
@@ -37,7 +38,7 @@ struct Drawing {
     layer: usize,
     time: Tick,
     last: Point,
-    previous: Point,
+    smoother: Option<StrokeSmoother>,
     liquify: bool,
     index: Option<SpatialIndex>,
 }
@@ -61,7 +62,7 @@ pub struct Studio {
     settings_tab: usize,
     layer_scroll: f32,
     page: Page,
-    window_page: Page,
+    return_page: Page,
     tool: Tool,
     layer: usize,
     time: f64,
@@ -70,6 +71,7 @@ pub struct Studio {
     path: Option<PathBuf>,
     renderer: Arc<Mutex<Renderer>>,
     transport: Transport,
+    play_origin: f64,
     drawing: Option<Drawing>,
     tablet: Tablet,
     audio_bytes: Option<Arc<Vec<u8>>>,
@@ -119,7 +121,7 @@ impl Studio {
             layer_scroll: 0.0,
             history: History::default(),
             page: Page::Canvas,
-            window_page: Page::Canvas,
+            return_page: Page::Canvas,
             tool: Tool::Ink,
             layer: 0,
             time: 0.0,
@@ -128,6 +130,7 @@ impl Studio {
             path: None,
             renderer,
             transport: Transport::default(),
+            play_origin: 0.0,
             drawing: None,
             tablet: Tablet::new(cc.egui_ctx.clone()),
             audio_bytes: None,
@@ -185,9 +188,22 @@ impl Studio {
             return;
         }
         match action {
-            "Canvas" => self.page = Page::Canvas,
-            "Timeline" => self.page = Page::Timeline,
-            "Settings" => self.page = Page::Settings,
+            "Canvas" => {
+                self.page = Page::Canvas;
+                self.return_page = Page::Canvas;
+            }
+            "Timeline" => {
+                self.page = Page::Timeline;
+                self.return_page = Page::Timeline;
+            }
+            "Settings" => {
+                if self.page == Page::Settings {
+                    self.page = self.return_page;
+                } else {
+                    self.return_page = self.page;
+                    self.page = Page::Settings;
+                }
+            }
             "Save" => self.save(false),
             "Save as" => self.save(true),
             "Import music" => self.import_audio(),
@@ -354,14 +370,19 @@ impl Studio {
     }
     fn toggle_play(&mut self) {
         if self.transport.playing {
-            let t = self.playback_time();
+            let t = self.preferences.pause_behavior.position(
+                &self.doc.timing,
+                self.play_origin,
+                self.playback_time(),
+            );
             self.set_time(t);
         } else {
             if self.time >= self.doc.timing.duration {
                 self.time = 0.0;
             }
-            if let Err(error) = self.transport.play(self.time) {
-                self.fail(error);
+            match self.transport.play(self.time) {
+                Ok(()) => self.play_origin = self.time,
+                Err(error) => self.fail(error),
             }
         }
     }
@@ -670,7 +691,14 @@ impl Studio {
             layer,
             time,
             last: point,
-            previous: point,
+            smoother: if !liquify
+                && !movement
+                && self.preferences.interpolation == Interpolation::Smooth
+            {
+                Some(StrokeSmoother::new(point))
+            } else {
+                None
+            },
             liquify,
             index,
         });
@@ -691,6 +719,9 @@ impl Studio {
                 );
                 if let Some(stroke) = cel.strokes.last_mut() {
                     let stroke = Arc::make_mut(stroke);
+                    if let Some(smoother) = &mut drawing.smoother {
+                        smoother.stationary_pressure(point.pressure);
+                    }
                     if stroke.dab(point.pressure) {
                         drawing.last.pressure = point.pressure;
                     }
@@ -732,43 +763,23 @@ impl Studio {
                     stroke.points.push(point);
                 } else {
                     stroke.points[1] = point;
-                    stroke.revision = next_revision();
+                    stroke.invalidate_from(0);
                 }
+            } else if let Some(smoother) = &mut drawing.smoother {
+                smoother.push(stroke, point, self.preferences.spacing);
             } else {
-                let spacing = self.preferences.spacing;
-                let steps = (distance / spacing).ceil().max(1.0) as usize;
-                let a = drawing.last;
-                let before = drawing.previous;
+                let steps = (distance / self.preferences.spacing).ceil().max(1.0) as usize;
+                let start = drawing.last;
                 for i in 1..=steps {
                     let t = i as f32 / steps as f32;
-                    let (x, y) = if self.preferences.interpolation == Interpolation::Smooth {
-                        // Local Hermite interpolation, preserving both measured endpoints.
-                        let mut tangent = [(point.x - before.x) * 0.5, (point.y - before.y) * 0.5];
-                        let length = tangent[0].hypot(tangent[1]);
-                        if length > distance {
-                            tangent[0] *= distance / length;
-                            tangent[1] *= distance / length;
-                        }
-                        let h00 = 2.0 * t * t * t - 3.0 * t * t + 1.0;
-                        let h10 = t * t * t - 2.0 * t * t + t;
-                        let h01 = -2.0 * t * t * t + 3.0 * t * t;
-                        let h11 = t * t * t - t * t;
-                        (
-                            h00 * a.x + h10 * tangent[0] + h01 * point.x + h11 * delta[0],
-                            h00 * a.y + h10 * tangent[1] + h01 * point.y + h11 * delta[1],
-                        )
-                    } else {
-                        (a.x + delta[0] * t, a.y + delta[1] * t)
-                    };
                     stroke.points.push(Point {
-                        x,
-                        y,
-                        pressure: a.pressure + (point.pressure - a.pressure) * t,
+                        x: start.x + delta[0] * t,
+                        y: start.y + delta[1] * t,
+                        pressure: start.pressure + (point.pressure - start.pressure) * t,
                     });
                 }
             }
         }
-        drawing.previous = drawing.last;
         drawing.last = point;
     }
     fn start_export(&mut self) {
@@ -1008,6 +1019,76 @@ impl Studio {
                 std::fs::write(directory.join(format!("{name}.ppm")), ppm).unwrap();
                 outputs.push(format!("{name}: {black} non-white pixels"));
             }
+            // Long curves edit their live suffix; incremental VBO contents must remain
+            // identical to fresh geometry through batching, pressure, undo and branching.
+            let mut curve_doc = Document::default();
+            let first = Point {
+                x: 1240.0,
+                y: 400.0,
+                pressure: 0.2,
+            };
+            curve_doc.layers[0].cels.insert(
+                0,
+                Arc::new(Cel {
+                    strokes: vec![Arc::new(Stroke::new(12.0, first))],
+                }),
+            );
+            let mut smoother = StrokeSmoother::new(first);
+            let mut checkpoint = None;
+            for i in 1..=36 {
+                let a = i as f32 / 12.0 * std::f32::consts::TAU;
+                let point = Point {
+                    x: 960.0 + a.cos() * 280.0,
+                    y: 400.0 + a.sin() * 280.0,
+                    pressure: 0.2 + i as f32 / 60.0,
+                };
+                let cel = Arc::make_mut(curve_doc.layers[0].cels.get_mut(&0).unwrap());
+                smoother.push(Arc::make_mut(&mut cel.strokes[0]), point, 1.5);
+                if i == 6 {
+                    checkpoint = Some((curve_doc.clone(), smoother.clone()));
+                }
+                if i % 3 == 0 {
+                    unsafe {
+                        renderer.verify_curve_cache(gl, &curve_doc);
+                    }
+                }
+                if i == 12 {
+                    let pixels =
+                        unsafe { renderer.read_frame(gl, &curve_doc.scene(0), [960, 402]) }
+                            .unwrap();
+                    let mut ppm = b"P6\n960 402\n255\n".to_vec();
+                    for row in pixels.as_chunks::<{ 960 * 4 }>().0.iter().rev() {
+                        for pixel in row.as_chunks::<4>().0 {
+                            ppm.extend_from_slice(&pixel[..3]);
+                        }
+                    }
+                    std::fs::write(directory.join("smooth-sparse-circle.ppm"), ppm).unwrap();
+                }
+            }
+            let (mut previous, mut previous_smoother) = checkpoint.unwrap();
+            unsafe {
+                renderer.verify_curve_cache(gl, &previous);
+                renderer.verify_curve_cache(gl, &curve_doc);
+            }
+            let cel = Arc::make_mut(previous.layers[0].cels.get_mut(&0).unwrap());
+            previous_smoother.push(
+                Arc::make_mut(&mut cel.strokes[0]),
+                Point {
+                    x: 600.0,
+                    y: 450.0,
+                    pressure: 0.6,
+                },
+                1.5,
+            );
+            unsafe {
+                renderer.verify_curve_cache(gl, &previous);
+            }
+            let cel = Arc::make_mut(previous.layers[0].cels.get_mut(&0).unwrap());
+            Arc::make_mut(&mut cel.strokes[0]).dab(1.0);
+            unsafe {
+                renderer.verify_curve_cache(gl, &previous);
+            }
+            outputs.push("Smooth sparse input: incremental GPU geometry matches full rebuild through pressure, undo/redo and branching".into());
             // Blur regressions: all styles stay inside the swept, pressure-sized footprint.
             let mut local_doc = Document::default();
             local_doc.settings.aspect = 2.0;
@@ -1257,12 +1338,6 @@ impl eframe::App for Studio {
             self.ui_editing = false;
         }
         self.keyboard(ctx);
-        if self.window_page != self.page {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(
-                self.page != Page::Canvas,
-            ));
-            self.window_page = self.page;
-        }
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BG).inner_margin(0))
             .show(ctx, |ui| {

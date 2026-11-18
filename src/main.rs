@@ -1,5 +1,6 @@
 mod app;
 mod audio;
+mod curve;
 mod export;
 mod model;
 mod preferences;
@@ -11,7 +12,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("MORI")
-            .with_decorations(false)
+            .with_decorations(true)
             .with_icon(
                 eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png"))
                     .expect("Bundled app icon"),

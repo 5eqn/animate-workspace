@@ -19,6 +19,7 @@ struct Mesh {
     capacity: usize,
     points: usize,
     revision: u64,
+    point_offsets: Vec<usize>,
     last_used: u64,
 }
 pub struct Renderer {
@@ -78,8 +79,16 @@ fn disk(out: &mut Vec<f32>, x: f32, y: f32, r: f32, flow: [f32; 2]) {
         vertex(out, x + b.cos() * r, y + b.sin() * r, flow);
     }
 }
+#[cfg(test)]
 fn append_geometry(stroke: &Stroke, from: usize) -> Vec<f32> {
+    geometry(stroke, from).0
+}
+fn geometry(stroke: &Stroke, from: usize) -> (Vec<f32>, Vec<usize>) {
     let mut vertices = Vec::new();
+    let mut offsets = Vec::with_capacity(stroke.points.len() - from);
+    if from == 0 && !stroke.points.is_empty() {
+        offsets.push(0);
+    }
     if from == 0 {
         if let Some(p) = stroke.points.first() {
             disk(
@@ -92,6 +101,7 @@ fn append_geometry(stroke: &Stroke, from: usize) -> Vec<f32> {
         }
     }
     for i in from.max(1)..stroke.points.len() {
+        offsets.push(vertices.len());
         let p = stroke.points[i];
         let a = stroke.points[i - 1];
         let length = a.distance(p);
@@ -134,7 +144,7 @@ fn append_geometry(stroke: &Stroke, from: usize) -> Vec<f32> {
             }
         }
     }
-    vertices
+    (vertices, offsets)
 }
 impl Renderer {
     pub unsafe fn new(gl: &glow::Context) -> Result<Self, String> {
@@ -289,21 +299,33 @@ impl Renderer {
             capacity: 0,
             points: 0,
             revision: stroke.revision,
+            point_offsets: Vec::new(),
             last_used: self.frame,
         });
-        // Arc copy-on-write can restore an older stroke with the same ID after undo.
-        // Rebuild on point count shrink or changed geometry revision.
-        if mesh.revision != stroke.revision
-            || mesh.points > stroke.points.len()
-            || (mesh.points == 1 && stroke.points.len() > 1)
-        {
-            mesh.points = 0;
-            mesh.count = 0;
-            mesh.body_count = 0;
+        // Rewind only the changed tip. Revision branches absent from the journal
+        // (e.g. undo) rebuild in full, preserving exact saved/history geometry.
+        let mut from = mesh.points;
+        if mesh.revision != stroke.revision {
+            from = from.min(stroke.changed_since(mesh.revision));
+        }
+        if mesh.points > stroke.points.len() {
+            from = if mesh.revision != stroke.revision {
+                from.min(stroke.points.len().saturating_sub(1))
+            } else {
+                0
+            };
+        }
+        if mesh.points == 1 && stroke.points.len() > 1 {
+            from = 0;
+        }
+        if from < mesh.points {
+            mesh.body_count = mesh.point_offsets[from];
+            mesh.points = from;
+            mesh.point_offsets.truncate(from);
         }
         gl.bind_buffer(glow::ARRAY_BUFFER, Some(mesh.buffer));
         if mesh.points < stroke.points.len() {
-            let mut vertices = append_geometry(stroke, mesh.points);
+            let (mut vertices, offsets) = geometry(stroke, mesh.points);
             let body_added = vertices.len();
             if let Some(p) = stroke.points.last() {
                 disk(
@@ -316,7 +338,8 @@ impl Renderer {
             }
             let needed = mesh.body_count + vertices.len();
             if needed > mesh.capacity {
-                let mut all = append_geometry(stroke, 0);
+                let (mut all, all_offsets) = geometry(stroke, 0);
+                mesh.point_offsets = all_offsets;
                 mesh.body_count = all.len();
                 if let Some(p) = stroke.points.last() {
                     disk(
@@ -342,11 +365,14 @@ impl Renderer {
                     bytes(&vertices),
                 );
                 mesh.count = needed;
+                mesh.point_offsets
+                    .extend(offsets.into_iter().map(|offset| offset + mesh.body_count));
                 mesh.body_count += body_added;
             }
             mesh.points = stroke.points.len();
             mesh.revision = stroke.revision;
         }
+        mesh.revision = stroke.revision;
         mesh.last_used = self.frame;
         gl.enable_vertex_attrib_array(0);
         gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 16, 0);
@@ -576,6 +602,26 @@ impl Renderer {
         gl.bind_framebuffer(glow::FRAMEBUFFER, framebuffer);
         gl.viewport(viewport[0], viewport[1], viewport[2], viewport[3]);
         result
+    }
+    pub unsafe fn verify_curve_cache(
+        &mut self,
+        gl: &glow::Context,
+        document: &crate::model::Document,
+    ) {
+        let actual = self.read_frame(gl, &document.scene(0), [960, 402]).unwrap();
+        let mut fresh = document.clone();
+        let cel = Arc::make_mut(fresh.layers[0].cels.get_mut(&0).unwrap());
+        let stroke = Arc::make_mut(&mut cel.strokes[0]);
+        stroke.id = crate::model::next_revision();
+        let fresh_id = stroke.id;
+        let expected = self.read_frame(gl, &fresh.scene(0), [960, 402]).unwrap();
+        assert_eq!(
+            actual, expected,
+            "Incremental curve rendering differs from full geometry"
+        );
+        if let Some(mesh) = self.meshes.remove(&fresh_id) {
+            gl.delete_buffer(mesh.buffer);
+        }
     }
     pub unsafe fn verify_blur_directions(&mut self, gl: &glow::Context) {
         use crate::model::*;

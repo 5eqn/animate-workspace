@@ -32,6 +32,15 @@ def shot(name):
     image.save(out / (name + '.png'))
     return image
 
+def dark_surface(image, bounds):
+    pixels=list(image.convert('RGB').crop(bounds).getdata())
+    bright=sum(min(p)>210 for p in pixels)
+    assert bright/len(pixels)<.12,'A menu or input reverted to a bright background'
+
+def playhead(image):
+    line=image.convert('RGB')
+    return max(range(223,1400),key=lambda x:line.getpixel((x,920))[2])
+
 def start(env,demo=True):
     process = subprocess.Popen([binary]+(['--demo'] if demo else []),cwd=root,env=env)
     time.sleep(1)
@@ -58,6 +67,11 @@ with tempfile.TemporaryDirectory(prefix='mori-ui-') as temporary:
         key('ctrl+comma');shot('settings')
         for i,name in enumerate(['project','brushes','onion','playback','export','shortcuts']):
             click(90,124+i*48);shot('settings-'+name)
+        click(72,51)
+        returned=shot('back-to-timeline')
+        assert min(returned.getpixel((300,50))[:3])>240,'Settings Back did not return to P2'
+        key('ctrl+comma');click(90,124)
+        click(975,303);popup=shot('settings-grid-popup');dark_surface(popup,(930,345,1010,500));key('Escape')
         click(90,172)
         edit(850,675,84)
         edit(967,675,360)
@@ -78,7 +92,10 @@ with tempfile.TemporaryDirectory(prefix='mori-ui-') as temporary:
         assert ImageChops.difference(tap,undo).getbbox(),'Undo did not change drawing'
         assert ImageChops.difference(tap,redo).getbbox() is None,'Redo did not restore drawing'
         key('l');shot('liquify')
-        key('alt+2');click(90,615,3);shot('layer-menu')
+        key('alt+2');click(90,615,3)
+        menu=shot('layer-menu');dark_surface(menu,(96,565,326,950))
+        click(277,630);popup=shot('layer-blend-popup');dark_surface(popup,(220,680,310,800))
+        key('Escape');click(1250,50);click(90,615,3)
         # The context menu is the only layer-creation control.
         click(140,824)
         created=shot('layer-created')
@@ -128,7 +145,32 @@ with tempfile.TemporaryDirectory(prefix='mori-ui-') as temporary:
         key('l');assert abs(cursor_size()-liquid0_changed)<=2,'Liquify size did not survive tool/layer switches'
         key('ctrl+comma');click(90,268);shot('preferences-restored')
         assert json.loads(prefs.read_text())['video_delay_ms']==-125
+        click(72,51)
+        returned=shot('back-to-canvas')
+        assert max(returned.getpixel((300,50))[:3])<80 and min(returned.getpixel((600,400))[:3])>240,'Settings Back did not return to P1'
+        key('d');key('d');key('d');key('alt+2')
+        origin=playhead(shot('pause-origin'))
+        key('space');time.sleep(.35);key('space')
+        assert abs(playhead(shot('pause-returned'))-origin)<=1,'Default pause did not return to playback origin'
+        key('ctrl+comma');click(90,268)
+        panel=shot('pause-settings')
+        # Find the filled pause dropdown below the offset explanations.
+        runs=[];run=None
+        for y in range(235,400):
+            r,g,b=panel.convert('RGB').getpixel((1007,y))
+            active=20<r<75 and 20<g<80 and 20<b<100
+            if active and run is None:run=y
+            if not active and run is not None:
+                if y-run>10:runs.append((run,y))
+                run=None
+        assert runs,'Pause dropdown is missing'
+        y0,y1=runs[-1];cy=(y0+y1)//2
+        click(940,cy);popup=shot('pause-options');dark_surface(popup,(850,cy+25,1000,cy+75))
+        click(920,cy+74)
+        assert json.loads(prefs.read_text())['pause_behavior']=='KeepPlayhead','Pause option was not persisted'
+        click(72,51);key('space');time.sleep(.35);key('space')
+        assert playhead(shot('pause-kept'))>origin+20,'Keep-playhead pause still returned to origin'
         assert process.poll() is None
     finally:
         process.terminate();process.wait(timeout=10)
-print('Pages, all settings panels, signed preference persistence, brush memory, undo/redo: passed')
+print('Pages, dark popups, Settings Back, pause modes, preferences, brush memory, undo/redo and timeline gestures: passed')

@@ -3,6 +3,7 @@ use egui::scroll_area::ScrollBarVisibility;
 use egui::{epaint::PathShape, Align2, Id, PointerButton, TextStyle};
 
 pub(super) fn configure(ctx: &egui::Context) {
+    ctx.set_theme(egui::Theme::Dark);
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "Inter".into(),
@@ -24,20 +25,49 @@ pub(super) fn configure(ctx: &egui::Context) {
     style.visuals.faint_bg_color = PANEL;
     style.visuals.override_text_color = Some(INK);
     style.visuals.selection.bg_fill = Color32::from_rgb(51, 57, 73);
-    style.visuals.widgets.noninteractive.bg_stroke = UiStroke::new(1.0_f32, LINE);
-    for widget in [
-        &mut style.visuals.widgets.inactive,
-        &mut style.visuals.widgets.hovered,
-        &mut style.visuals.widgets.active,
+    style.visuals.code_bg_color = Color32::from_rgb(29, 32, 39);
+    style.visuals.text_cursor.stroke = UiStroke::new(1.2_f32, ACCENT);
+    style.visuals.selection.stroke = UiStroke::new(1.0_f32, Color32::from_rgb(224, 231, 246));
+    for (widget, fill, weak, stroke) in [
+        (
+            &mut style.visuals.widgets.noninteractive,
+            PANEL,
+            PANEL,
+            LINE,
+        ),
+        (
+            &mut style.visuals.widgets.inactive,
+            Color32::from_rgb(32, 35, 43),
+            Color32::TRANSPARENT,
+            Color32::from_rgb(49, 54, 65),
+        ),
+        (
+            &mut style.visuals.widgets.hovered,
+            Color32::from_rgb(43, 48, 59),
+            Color32::from_rgb(36, 41, 51),
+            Color32::from_rgb(71, 80, 99),
+        ),
+        (
+            &mut style.visuals.widgets.active,
+            Color32::from_rgb(51, 60, 78),
+            Color32::from_rgb(43, 52, 69),
+            Color32::from_rgb(104, 122, 154),
+        ),
+        (
+            &mut style.visuals.widgets.open,
+            Color32::from_rgb(40, 46, 58),
+            Color32::from_rgb(40, 46, 58),
+            Color32::from_rgb(71, 80, 99),
+        ),
     ] {
-        widget.bg_stroke = UiStroke::NONE;
-        widget.corner_radius = 5.into();
-        widget.bg_fill = Color32::from_rgb(32, 34, 39);
-        widget.weak_bg_fill = Color32::TRANSPARENT;
+        widget.bg_fill = fill;
+        widget.weak_bg_fill = weak;
+        widget.bg_stroke = UiStroke::new(1.0_f32, stroke);
+        widget.fg_stroke = UiStroke::new(1.0_f32, INK);
+        widget.corner_radius = 6.into();
+        widget.expansion = 0.0;
     }
-    style.visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(32, 34, 39);
-    style.visuals.widgets.active.weak_bg_fill = Color32::from_rgb(42, 46, 57);
-    style.visuals.widgets.hovered.fg_stroke = UiStroke::new(1.0_f32, INK);
+    style.visuals.menu_corner_radius = 10.into();
     style.visuals.window_corner_radius = 9.into();
     style.visuals.window_stroke = UiStroke::new(1.0_f32, LINE);
     style.visuals.popup_shadow = egui::epaint::Shadow {
@@ -47,6 +77,7 @@ pub(super) fn configure(ctx: &egui::Context) {
         color: Color32::from_black_alpha(85),
     };
     style.spacing.item_spacing = Vec2::new(12.0, 8.0);
+    style.spacing.menu_margin = egui::Margin::same(10);
     style.spacing.button_padding = Vec2::new(12.0, 8.0);
     style.spacing.interact_size = Vec2::new(36.0, 30.0);
     style
@@ -58,7 +89,10 @@ pub(super) fn configure(ctx: &egui::Context) {
     style
         .text_styles
         .insert(TextStyle::Small, FontId::proportional(11.0));
-    ctx.set_style(style);
+    // Native theme notifications may arrive after CreationContext initialization.
+    // Both style slots are explicit so popups cannot fall back to egui's light palette.
+    ctx.set_style_of(egui::Theme::Light, style.clone());
+    ctx.set_style_of(egui::Theme::Dark, style);
 }
 fn hairline(p: &egui::Painter, rect: Rect, y: f32) {
     p.hline(rect.x_range(), y, UiStroke::new(1.0_f32, LINE));
@@ -96,7 +130,10 @@ fn row(ui: &mut egui::Ui, name: &str, control: impl FnOnce(&mut egui::Ui)) {
                 rect.max - Vec2::new(0.0, 9.0),
             ))
             .layout(Layout::right_to_left(Align::Center)),
-        control,
+        |ui| {
+            ui.style_mut().visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(29, 33, 41);
+            control(ui);
+        },
     );
     hairline(ui.painter(), rect, rect.bottom());
 }
@@ -174,6 +211,32 @@ fn step_control(ui: &mut egui::Ui, step: &mut f64) -> bool {
             }
         });
     changed
+}
+fn menu_surface(ui: &mut egui::Ui) {
+    ui.set_width(224.0);
+    ui.spacing_mut().item_spacing = Vec2::new(8.0, 5.0);
+    ui.spacing_mut().button_padding = Vec2::new(10.0, 7.0);
+    ui.visuals_mut().widgets.inactive.bg_stroke = UiStroke::NONE;
+}
+fn menu_row(ui: &mut egui::Ui, name: &str, control: impl FnOnce(&mut egui::Ui)) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::hover());
+    label(
+        ui.painter(),
+        rect.left_center() + Vec2::new(2.0, 0.0),
+        Align2::LEFT_CENTER,
+        name,
+        12.0,
+        MUTED,
+    );
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(Rect::from_min_max(
+                Pos2::new(rect.right() - 132.0, rect.top() + 2.0),
+                rect.max - Vec2::new(0.0, 2.0),
+            ))
+            .layout(Layout::right_to_left(Align::Center)),
+        control,
+    );
 }
 fn diamond(p: &egui::Painter, c: Pos2, r: f32, color: Color32) {
     p.add(egui::Shape::convex_polygon(
@@ -424,6 +487,7 @@ impl Studio {
         }
         let wave_response = ui.interact(wave, Id::new("wave_context"), Sense::click());
         wave_response.context_menu(|ui| {
+            menu_surface(ui);
             if ui
                 .button(if self.doc.audio.is_some() {
                     "Replace audio…"
@@ -495,6 +559,7 @@ impl Studio {
                 changed = true;
             }
             marker_response.context_menu(|ui| {
+                menu_surface(ui);
                 changed |= ui
                     .add(
                         egui::DragValue::new(&mut self.doc.timing.tempos[i].bpm)
@@ -530,6 +595,7 @@ impl Studio {
             }
         }
         response.context_menu(|ui| {
+            menu_surface(ui);
             if ui.button("Add tempo start").clicked() {
                 add_tempo = Some(self.time);
                 ui.close_menu();
@@ -621,6 +687,7 @@ impl Studio {
             Sense::click(),
         );
         background.context_menu(|ui| {
+            menu_surface(ui);
             if ui.button("New layer").clicked() {
                 create = true;
                 ui.close_menu();
@@ -731,48 +798,69 @@ impl Studio {
             }
             for response in [&label_response, &context] {
                 response.context_menu(|ui| {
+                    menu_surface(ui);
                     let layer = &mut self.doc.layers[i];
-                    changed |= ui.text_edit_singleline(&mut layer.name).changed();
+                    changed |= ui
+                        .add(
+                            egui::TextEdit::singleline(&mut layer.name)
+                                .font(FontId::proportional(14.0))
+                                .desired_width(224.0)
+                                .frame(false),
+                        )
+                        .changed();
+                    ui.add_space(5.0);
+                    ui.separator();
+                    ui.add_space(3.0);
                     if i > 0 {
-                        egui::ComboBox::from_id_salt(("blend", i))
-                            .selected_text(layer.blend.name())
-                            .show_ui(ui, |ui| {
-                                for blend in Blend::OVERLAYS {
-                                    if ui
-                                        .selectable_value(&mut layer.blend, blend, blend.name())
-                                        .changed()
-                                    {
-                                        changed = true;
-                                        if blend == Blend::Move {
-                                            for cel in layer.cels.values_mut() {
-                                                let cel = Arc::make_mut(cel);
-                                                if cel.strokes.len() > 1 {
-                                                    let last = cel.strokes.pop().unwrap();
-                                                    cel.strokes = vec![last];
+                        menu_row(ui, "Blend", |ui| {
+                            egui::ComboBox::from_id_salt(("blend", i))
+                                .width(124.0)
+                                .selected_text(layer.blend.name())
+                                .show_ui(ui, |ui| {
+                                    for blend in Blend::OVERLAYS {
+                                        if ui
+                                            .selectable_value(&mut layer.blend, blend, blend.name())
+                                            .changed()
+                                        {
+                                            changed = true;
+                                            if blend == Blend::Move {
+                                                for cel in layer.cels.values_mut() {
+                                                    let cel = Arc::make_mut(cel);
+                                                    if cel.strokes.len() > 1 {
+                                                        let last = cel.strokes.pop().unwrap();
+                                                        cel.strokes = vec![last];
+                                                    }
                                                 }
                                             }
                                         }
                                     }
-                                }
-                            });
+                                });
+                        });
                     }
-                    changed |= ui.checkbox(&mut layer.visible, "Visible").changed();
-                    changed |= ui.checkbox(&mut layer.inverted, "Invert").changed();
+                    menu_row(ui, "Visible", |ui| {
+                        changed |= toggle(ui, &mut layer.visible).changed();
+                    });
+                    menu_row(ui, "Invert", |ui| {
+                        changed |= toggle(ui, &mut layer.inverted).changed();
+                    });
                     if layer.blend.effect() {
-                        ui.horizontal(|ui| {
-                            ui.label("Strength");
+                        menu_row(ui, "Amount", |ui| {
                             changed |= number(ui, &mut layer.strength, "", 0.0..=3.0);
                         });
-                        egui::ComboBox::from_id_salt(("style", i))
-                            .selected_text(layer.style.name())
-                            .show_ui(ui, |ui| {
-                                for style in Style::ALL {
-                                    changed |= ui
-                                        .selectable_value(&mut layer.style, style, style.name())
-                                        .changed();
-                                }
-                            });
+                        menu_row(ui, "Style", |ui| {
+                            egui::ComboBox::from_id_salt(("style", i))
+                                .width(124.0)
+                                .selected_text(layer.style.name())
+                                .show_ui(ui, |ui| {
+                                    for style in Style::ALL {
+                                        changed |= ui
+                                            .selectable_value(&mut layer.style, style, style.name())
+                                            .changed();
+                                    }
+                                });
+                        });
                     }
+                    ui.add_space(5.0);
                     ui.separator();
                     if ui.button("New layer").clicked() {
                         create = true;
@@ -794,7 +882,14 @@ impl Studio {
                         changed = true;
                         ui.close_menu();
                     }
-                    if i > 0 && ui.button("Delete layer").clicked() {
+                    if i > 0
+                        && ui
+                            .button(
+                                RichText::new("Delete layer")
+                                    .color(Color32::from_rgb(211, 143, 151)),
+                            )
+                            .clicked()
+                    {
                         delete = Some(i);
                         ui.close_menu();
                     }
@@ -847,34 +942,69 @@ impl Studio {
             "Export",
             "Shortcuts",
         ];
-        ui.scope_builder(
-            egui::UiBuilder::new().max_rect(sidebar.shrink2(Vec2::new(24.0, 38.0))),
-            |ui| {
-                text(ui, "Settings", 18.0, INK);
-                ui.add_space(36.0);
-                for (i, name) in tabs.iter().enumerate() {
-                    let (r, response) = ui
-                        .allocate_exact_size(Vec2::new(ui.available_width(), 40.0), Sense::click());
-                    if self.settings_tab == i {
-                        ui.painter()
-                            .rect_filled(r, 5.0, Color32::from_rgb(30, 32, 38));
-                    }
-                    label(
-                        ui.painter(),
-                        r.left_center() + Vec2::new(12.0, 0.0),
-                        Align2::LEFT_CENTER,
-                        name,
-                        13.0,
-                        if self.settings_tab == i { INK } else { MUTED },
-                    );
-                    if response.clicked() {
-                        self.settings_tab = i;
-                        self.bind_capture = None;
-                        ctx.memory_mut(|m| m.surrender_focus(m.focused().unwrap_or(Id::NULL)));
-                    }
-                }
-            },
+        let back = Rect::from_min_size(
+            sidebar.min + Vec2::new(24.0, 38.0),
+            Vec2::new(sidebar.width() - 48.0, 26.0),
         );
+        let response = ui
+            .interact(back, Id::new("settings_back"), Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        let color = if response.hovered() { INK } else { MUTED };
+        let c = Pos2::new(back.left() + 7.0, back.center().y);
+        ui.painter().add(PathShape::line(
+            vec![
+                c + Vec2::new(3.0, -4.0),
+                c - Vec2::new(1.0, 0.0),
+                c + Vec2::new(3.0, 4.0),
+            ],
+            UiStroke::new(1.3_f32, color),
+        ));
+        label(
+            ui.painter(),
+            Pos2::new(back.left() + 24.0, back.center().y),
+            Align2::LEFT_CENTER,
+            "Back",
+            13.0,
+            color,
+        );
+        if response.clicked() {
+            self.page = self.return_page;
+            self.bind_capture = None;
+            ctx.memory_mut(|m| m.surrender_focus(m.focused().unwrap_or(Id::NULL)));
+        }
+        for (i, name) in tabs.iter().enumerate() {
+            let r = Rect::from_min_size(
+                sidebar.min + Vec2::new(24.0, 104.0 + i as f32 * 48.0),
+                Vec2::new(sidebar.width() - 48.0, 40.0),
+            );
+            let response = ui
+                .interact(r, Id::new(("settings_tab", i)), Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if self.settings_tab == i || response.hovered() {
+                ui.painter().rect_filled(
+                    r,
+                    5.0,
+                    if self.settings_tab == i {
+                        Color32::from_rgb(30, 34, 43)
+                    } else {
+                        Color32::from_rgb(24, 27, 33)
+                    },
+                );
+            }
+            label(
+                ui.painter(),
+                r.left_center() + Vec2::new(12.0, 0.0),
+                Align2::LEFT_CENTER,
+                name,
+                13.0,
+                if self.settings_tab == i { INK } else { MUTED },
+            );
+            if response.clicked() {
+                self.settings_tab = i;
+                self.bind_capture = None;
+                ctx.memory_mut(|m| m.surrender_focus(m.focused().unwrap_or(Id::NULL)));
+            }
+        }
         let content = Rect::from_min_max(
             Pos2::new(sidebar.right() + 56.0, rect.top() + 40.0),
             Pos2::new(
@@ -983,7 +1113,8 @@ impl Studio {
                                 number(ui, &mut self.preferences.minimum_pressure, "", 0.0..=0.5);
                             });
                             row(ui, "Sample spacing", |ui| {
-                                number(ui, &mut self.preferences.spacing, " px", 0.25..=8.0);
+                                ui.add(egui::DragValue::new(&mut self.preferences.spacing).range(0.25..=8.0).speed(0.2).max_decimals(2).suffix(" px"))
+                                    .on_hover_text("Maximum distance between generated curve points, in canvas pixels.");
                             });
                             row(ui, "Interpolation", |ui| {
                                 egui::ComboBox::from_id_salt("interpolation")
@@ -1091,6 +1222,18 @@ impl Studio {
                                 12.0,
                                 MUTED,
                             );
+                            ui.add_space(22.0);
+                            row(ui, "On pause", |ui| {
+                                let selected=match self.preferences.pause_behavior {
+                                    PauseBehavior::ReturnToStart=>"Return to start",
+                                    PauseBehavior::KeepPlayhead=>"Keep playhead",
+                                };
+                                egui::ComboBox::from_id_salt("pause_behavior")
+                                    .width(172.0).selected_text(selected).show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut self.preferences.pause_behavior,PauseBehavior::ReturnToStart,"Return to start");
+                                        ui.selectable_value(&mut self.preferences.pause_behavior,PauseBehavior::KeepPlayhead,"Keep playhead");
+                                    });
+                            });
                         }
                         4 => {
                             row(ui, "Width", |ui| {
@@ -1154,8 +1297,8 @@ impl Studio {
                             } else if ui
                                 .add_enabled(
                                     self.doc.settings.export.end > self.doc.settings.export.start,
-                                    egui::Button::new(RichText::new("Export video").color(BG))
-                                        .fill(ACCENT)
+                                    egui::Button::new(RichText::new("Export video").color(Color32::from_rgb(228,234,247)))
+                                        .fill(Color32::from_rgb(54,73,107))
                                         .min_size(Vec2::new(160.0, 36.0)),
                                 )
                                 .clicked()
@@ -1215,5 +1358,41 @@ fn truncate(value: &str, limit: usize) -> String {
             .collect()
     } else {
         value.into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn native_light_theme_does_not_reset_popup_or_input_colors() {
+        let ctx = egui::Context::default();
+        configure(&ctx);
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            let input = egui::RawInput {
+                system_theme: Some(theme),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                assert_eq!(ctx.theme(), egui::Theme::Dark);
+                let style = ctx.style();
+                let visuals = &style.visuals;
+                for fill in [
+                    visuals.window_fill,
+                    visuals.extreme_bg_color,
+                    visuals.widgets.noninteractive.bg_fill,
+                    visuals.widgets.inactive.bg_fill,
+                    visuals.widgets.active.bg_fill,
+                    visuals.widgets.hovered.bg_fill,
+                    visuals.widgets.open.bg_fill,
+                ] {
+                    assert!(
+                        fill.r() < 100 && fill.g() < 100 && fill.b() < 100,
+                        "A widget reverted to a light surface"
+                    );
+                }
+                assert!(visuals.widgets.open.fg_stroke.color.r() > 180);
+            });
+        }
     }
 }

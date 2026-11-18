@@ -38,6 +38,20 @@ impl Default for OutputPreferences {
         }
     }
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PauseBehavior {
+    #[default]
+    ReturnToStart,
+    KeepPlayhead,
+}
+impl PauseBehavior {
+    pub fn position(self, timing: &Timing, start: f64, current: f64) -> f64 {
+        timing.snap(match self {
+            Self::ReturnToStart => start,
+            Self::KeepPlayhead => current,
+        })
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
@@ -50,6 +64,7 @@ pub struct Preferences {
     pub bindings: Vec<Binding>,
     /// Positive means the picture is delayed relative to the device's audio clock.
     pub video_delay_ms: f64,
+    pub pause_behavior: PauseBehavior,
     pub brush_defaults: [BrushDefaults; 6],
     pub default_aspect: f32,
     pub default_step: f64,
@@ -66,6 +81,7 @@ impl Default for Preferences {
             liquify_strength: 0.65,
             bindings: default_bindings(),
             video_delay_ms: 0.0,
+            pause_behavior: PauseBehavior::default(),
             brush_defaults: [6.0, 42.0, 42.0, 42.0, 100.0, 140.0].map(|ink| BrushDefaults {
                 ink,
                 liquify: 240.0,
@@ -258,5 +274,37 @@ mod tests {
         assert_eq!(opened.layers[0].width, 80.0);
         assert_eq!(p.new_document().layers[0].width, 6.0);
         assert_eq!(p.spacing, 3.0);
+    }
+}
+
+#[cfg(test)]
+mod pause_tests {
+    use super::*;
+    #[test]
+    fn default_pause_returns_to_origin_and_keep_playhead_snaps_current_time() {
+        let timing = Timing::default();
+        let preferences = Preferences::default();
+        assert_eq!(
+            preferences.pause_behavior.position(&timing, 0.1875, 1.26),
+            0.1875
+        );
+        assert_eq!(
+            PauseBehavior::KeepPlayhead.position(&timing, 0.1875, 1.26),
+            1.25
+        );
+    }
+    #[test]
+    fn pause_preference_survives_restart_and_older_files_get_return_to_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preferences.json");
+        let (mut store, mut preferences, _) = PreferenceStore::at(path.clone());
+        preferences.pause_behavior = PauseBehavior::KeepPlayhead;
+        store.save_if_changed(&preferences).unwrap();
+        let (_, loaded, _) = PreferenceStore::at(path);
+        assert_eq!(loaded.pause_behavior, PauseBehavior::KeepPlayhead);
+        let mut older = serde_json::to_value(loaded).unwrap();
+        older.as_object_mut().unwrap().remove("pause_behavior");
+        let migrated: Preferences = serde_json::from_value(older).unwrap();
+        assert_eq!(migrated.pause_behavior, PauseBehavior::ReturnToStart);
     }
 }

@@ -19,7 +19,7 @@ pub fn seconds(tick: Tick) -> f64 {
     tick as f64 / 1_000_000.0
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Point {
     pub x: f32,
     pub y: f32,
@@ -37,6 +37,8 @@ pub struct Stroke {
     pub points: Vec<Point>,
     #[serde(skip)]
     pub revision: u64,
+    #[serde(skip)]
+    geometry_edits: Vec<(u64, u64, usize)>,
 }
 impl Stroke {
     pub fn new(width: f32, point: Point) -> Self {
@@ -45,17 +47,44 @@ impl Stroke {
             width,
             points: vec![point],
             revision: 0,
+            geometry_edits: Vec::new(),
         }
     }
     pub fn dab(&mut self, pressure: f32) -> bool {
         if let Some(point) = self.points.last_mut() {
             if pressure > point.pressure {
                 point.pressure = pressure;
-                self.revision = next_revision();
+                self.invalidate_from(self.points.len() - 1);
                 return true;
             }
         }
         false
+    }
+    pub fn invalidate_from(&mut self, point: usize) {
+        let previous = self.revision;
+        self.revision = next_revision();
+        self.geometry_edits.push((previous, self.revision, point));
+    }
+    /// Earliest changed point on this revision branch. Unknown/undo branches rebuild safely.
+    pub fn changed_since(&self, revision: u64) -> usize {
+        if revision == self.revision {
+            return self.points.len();
+        }
+        self.geometry_edits
+            .iter()
+            .rposition(|(old, _, _)| *old == revision)
+            .filter(|_| {
+                self.geometry_edits
+                    .last()
+                    .is_some_and(|(_, new, _)| *new == self.revision)
+            })
+            .and_then(|i| {
+                self.geometry_edits[i..]
+                    .iter()
+                    .map(|(_, _, point)| *point)
+                    .min()
+            })
+            .unwrap_or(0)
     }
     pub fn motion(&self) -> [f32; 2] {
         match (self.points.first(), self.points.last()) {
@@ -706,7 +735,7 @@ impl SpatialIndex {
             self.cells.entry(self.key(new)).or_default().push((s, p));
         }
         for s in touched {
-            Arc::make_mut(&mut cel.strokes[s]).revision = next_revision();
+            Arc::make_mut(&mut cel.strokes[s]).invalidate_from(0);
         }
     }
 }
