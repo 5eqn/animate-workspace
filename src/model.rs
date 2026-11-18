@@ -135,6 +135,14 @@ impl Style {
         }
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Brush {
+    Ink,
+    Liquify,
+}
+fn default_liquify_width() -> f32 {
+    240.0
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Layer {
     pub name: String,
@@ -143,6 +151,8 @@ pub struct Layer {
     pub inverted: bool,
     pub visible: bool,
     pub width: f32,
+    #[serde(default = "default_liquify_width")]
+    pub liquify_width: f32,
     pub strength: f32,
     pub cels: BTreeMap<Tick, Arc<Cel>>,
 }
@@ -155,8 +165,21 @@ impl Layer {
             inverted: false,
             visible: true,
             width,
+            liquify_width: default_liquify_width(),
             strength: 1.0,
             cels: BTreeMap::new(),
+        }
+    }
+    pub fn brush_width(&self, brush: Brush) -> f32 {
+        match brush {
+            Brush::Ink => self.width,
+            Brush::Liquify => self.liquify_width,
+        }
+    }
+    pub fn brush_width_mut(&mut self, brush: Brush) -> &mut f32 {
+        match brush {
+            Brush::Ink => &mut self.width,
+            Brush::Liquify => &mut self.liquify_width,
         }
     }
     pub fn held(&self, time: Tick) -> Option<&Arc<Cel>> {
@@ -382,6 +405,10 @@ pub fn default_bindings() -> Vec<Binding> {
         ("Play", "Space", false, false, false),
         ("Onion skin", "O", false, false, false),
         ("Fullscreen", "F", false, false, false),
+        ("Fit", "0", false, false, false),
+        ("Import music", "I", true, false, false),
+        ("Export", "E", true, false, false),
+        ("Save as", "S", true, false, true),
     ]
     .into_iter()
     .map(|(a, k, c, o, s)| Binding {
@@ -394,13 +421,29 @@ pub fn default_bindings() -> Vec<Binding> {
     })
     .collect()
 }
+fn export_width() -> u32 {
+    1920
+}
+fn export_fps() -> u32 {
+    60
+}
+fn export_crf() -> u32 {
+    18
+}
+fn export_audio() -> bool {
+    true
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExportSettings {
+    #[serde(skip, default = "export_width")]
     pub width: u32,
+    #[serde(skip, default = "export_fps")]
     pub fps: u32,
     pub start: f64,
     pub end: f64,
+    #[serde(skip, default = "export_crf")]
     pub crf: u32,
+    #[serde(skip, default = "export_audio")]
     pub audio: bool,
 }
 impl Default for ExportSettings {
@@ -415,29 +458,16 @@ impl Default for ExportSettings {
         }
     }
 }
+/// Only composition data lives in an archive. Application preferences are independent.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
     pub aspect: f32,
-    pub onion: Onion,
-    pub pressure_gamma: f32,
-    pub minimum_pressure: f32,
-    pub spacing: f32,
-    pub interpolation: Interpolation,
-    pub liquify_strength: f32,
-    pub bindings: Vec<Binding>,
     pub export: ExportSettings,
 }
 impl Default for Settings {
     fn default() -> Self {
         Self {
             aspect: 2.39,
-            onion: Onion::default(),
-            pressure_gamma: 1.0,
-            minimum_pressure: 0.05,
-            spacing: 1.5,
-            interpolation: Interpolation::Smooth,
-            liquify_strength: 0.65,
-            bindings: default_bindings(),
             export: ExportSettings::default(),
         }
     }
@@ -506,16 +536,6 @@ impl Document {
             return Err("Invalid musical timing".into());
         }
         let s = &self.settings;
-        if !s.pressure_gamma.is_finite()
-            || s.pressure_gamma <= 0.0
-            || !s.minimum_pressure.is_finite()
-            || !(0.0..=1.0).contains(&s.minimum_pressure)
-            || !s.spacing.is_finite()
-            || s.spacing <= 0.0
-            || !s.liquify_strength.is_finite()
-        {
-            return Err("Invalid brush settings".into());
-        }
         if s.export.fps == 0
             || s.export.width < 2
             || !s.export.start.is_finite()
@@ -526,7 +546,12 @@ impl Document {
             return Err("Invalid export range".into());
         }
         for l in &self.layers {
-            if !l.width.is_finite() || l.width <= 0.0 || !l.strength.is_finite() {
+            if !l.width.is_finite()
+                || l.width <= 0.0
+                || !l.liquify_width.is_finite()
+                || l.liquify_width <= 0.0
+                || !l.strength.is_finite()
+            {
                 return Err("Invalid layer settings".into());
             }
             for c in l.cels.values() {
@@ -606,9 +631,6 @@ impl History {
         } else {
             false
         }
-    }
-    pub fn counts(&self) -> (usize, usize) {
-        (self.past.len(), self.future.len())
     }
 }
 
@@ -803,5 +825,24 @@ mod tests {
         assert!(history.redo(&mut doc));
         history.record(&doc);
         assert!(!history.redo(&mut doc));
+    }
+}
+
+#[cfg(test)]
+mod brush_tests {
+    use super::*;
+    #[test]
+    fn brushes_are_independent_per_layer_and_legacy_layers_get_large_liquify() {
+        let mut a = Layer::new("A", Blend::Xor, 12.0);
+        let b = Layer::new("B", Blend::Xor, 50.0);
+        *a.brush_width_mut(Brush::Liquify) = 360.0;
+        assert_eq!(a.brush_width(Brush::Ink), 12.0);
+        assert_eq!(a.brush_width(Brush::Liquify), 360.0);
+        assert_eq!(b.brush_width(Brush::Ink), 50.0);
+        assert_eq!(b.brush_width(Brush::Liquify), 240.0);
+        let mut json = serde_json::to_value(&a).unwrap();
+        json.as_object_mut().unwrap().remove("liquify_width");
+        let legacy: Layer = serde_json::from_value(json).unwrap();
+        assert_eq!(legacy.liquify_width, 240.0);
     }
 }

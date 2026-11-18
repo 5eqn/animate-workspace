@@ -7,7 +7,7 @@ uniform int mode;
 uniform int style;
 uniform bool inverted;
 uniform vec2 motion;
-uniform vec2 resolution;
+uniform vec2 canvas;
 uniform float strength;
 vec3 paper(vec2 p) {
     if (any(lessThan(p,vec2(0.0))) || any(greaterThan(p,vec2(1.0)))) return vec3(1.0);
@@ -38,6 +38,10 @@ void main() {
         color=vec4(inverted ? 1.0-moved : moved,1.0);
     }
     if (mode==5) {
+        vec4 field=texture(ink,uv);
+        float coverage=field.a;
+        if(coverage<=0.0) { color=vec4(a,1.0); return; }
+        d=vec2(field.x/canvas.x,-field.y/canvas.y)/coverage*strength;
         // Continuous directional shutter integration. No Gaussian kernel.
         vec3 blurred=vec3(0.0); float weight=0.0;
         for(int i=0;i<32;i++) {
@@ -48,6 +52,7 @@ void main() {
             if(style==3) sampleColor=mix(vec3(1.0),hsv(vec3(t+0.5,0.9,0.95)),1.0-dot(sampleColor,vec3(0.333333)));
             blurred+=sampleColor*w; weight+=w;
         }
-        color=vec4(inverted ? 1.0-blurred/weight : blurred/weight,1.0);
+        vec3 result=inverted ? 1.0-blurred/weight : blurred/weight;
+        color=vec4(mix(a,result,coverage),1.0);
     }
 }

@@ -2,6 +2,7 @@ use crate::{
     audio::{DecodedAudio, Transport},
     export::ExportJob,
     model::*,
+    preferences::{PreferenceStore, Preferences},
     project,
     render::{self, Ghost, Renderer, View},
     tablet::Tablet,
@@ -18,23 +19,20 @@ use std::{
     },
     time::{Duration, Instant},
 };
-const BG: Color32 = Color32::from_rgb(23, 25, 27);
-const PANEL: Color32 = Color32::from_rgb(29, 31, 33);
-const INK: Color32 = Color32::from_rgb(232, 231, 225);
-const MUTED: Color32 = Color32::from_rgb(135, 140, 143);
-const ACCENT: Color32 = Color32::from_rgb(214, 177, 132);
-const LINE: Color32 = Color32::from_rgb(51, 54, 57);
+mod ui;
+const BG: Color32 = Color32::from_rgb(17, 18, 20);
+const PANEL: Color32 = Color32::from_rgb(23, 24, 27);
+const INK: Color32 = Color32::from_rgb(227, 228, 232);
+const MUTED: Color32 = Color32::from_rgb(121, 125, 136);
+const ACCENT: Color32 = Color32::from_rgb(183, 193, 221);
+const LINE: Color32 = Color32::from_rgb(41, 43, 49);
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
     Canvas,
     Timeline,
     Settings,
 }
-#[derive(Clone, Copy, PartialEq)]
-enum Tool {
-    Ink,
-    Liquify,
-}
+type Tool = Brush;
 struct Drawing {
     layer: usize,
     time: Tick,
@@ -58,7 +56,12 @@ enum Pending {
 pub struct Studio {
     doc: Document,
     history: History,
+    preferences: Preferences,
+    preference_store: PreferenceStore,
+    settings_tab: usize,
+    layer_scroll: f32,
     page: Page,
+    window_page: Page,
     tool: Tool,
     layer: usize,
     time: f64,
@@ -71,6 +74,7 @@ pub struct Studio {
     tablet: Tablet,
     audio_bytes: Option<Arc<Vec<u8>>>,
     toast: Option<(String, Instant)>,
+    error: Option<String>,
     resized: Instant,
     export: Option<ExportJob>,
     export_renderer: Option<Renderer>,
@@ -92,48 +96,10 @@ pub struct Studio {
 fn text(ui: &mut egui::Ui, s: impl Into<String>, size: f32, color: Color32) {
     ui.label(RichText::new(s).size(size).color(color));
 }
-fn section(ui: &mut egui::Ui, kicker: &str, title: &str, description: &str) {
-    ui.add_space(12.0);
-    text(ui, kicker, 10.0, ACCENT);
-    ui.add_space(5.0);
-    text(ui, title, 25.0, INK);
-    text(ui, description, 12.0, MUTED);
-    ui.add_space(16.0);
-}
-fn chip(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
-    ui.add(
-        egui::Button::new(
-            RichText::new(label)
-                .size(12.0)
-                .color(if selected { BG } else { MUTED }),
-        )
-        .fill(if selected {
-            ACCENT
-        } else {
-            Color32::TRANSPARENT
-        })
-        .corner_radius(6.0)
-        .min_size(Vec2::new(64.0, 30.0)),
-    )
-}
 impl Studio {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let mut style = (*cc.egui_ctx.style()).clone();
-        style.visuals = egui::Visuals::dark();
-        style.visuals.panel_fill = BG;
-        style.visuals.window_fill = PANEL;
-        style.visuals.extreme_bg_color = Color32::from_rgb(18, 20, 22);
-        style.visuals.faint_bg_color = PANEL;
-        style.visuals.override_text_color = Some(INK);
-        style.visuals.selection.bg_fill = ACCENT.gamma_multiply(0.4);
-        style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(38, 41, 44);
-        style.visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(38, 41, 44);
-        style.visuals.widgets.inactive.bg_stroke = UiStroke::new(1.0_f32, LINE);
-        style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(54, 57, 59);
-        style.visuals.widgets.active.bg_fill = ACCENT.gamma_multiply(0.5);
-        style.spacing.item_spacing = Vec2::new(10.0, 9.0);
-        style.spacing.button_padding = Vec2::new(12.0, 7.0);
-        cc.egui_ctx.set_style(style);
+        ui::configure(&cc.egui_ctx);
+        let (preference_store, preferences, warning) = PreferenceStore::open();
         let renderer = Arc::new(Mutex::new(unsafe {
             Renderer::new(cc.gl.as_ref().expect("OpenGL renderer"))
                 .expect("GPU shaders must compile")
@@ -146,9 +112,14 @@ impl Studio {
             .map(PathBuf::from);
         let demo = args.iter().any(|a| a == "--demo") || smoke.is_some();
         let mut studio = Self {
-            doc: Document::default(),
+            doc: preferences.new_document(),
+            preferences,
+            preference_store,
+            settings_tab: 0,
+            layer_scroll: 0.0,
             history: History::default(),
             page: Page::Canvas,
+            window_page: Page::Canvas,
             tool: Tool::Ink,
             layer: 0,
             time: 0.0,
@@ -161,6 +132,7 @@ impl Studio {
             tablet: Tablet::new(cc.egui_ctx.clone()),
             audio_bytes: None,
             toast: None,
+            error: None,
             resized: Instant::now() - Duration::from_secs(10),
             export: None,
             export_renderer: None,
@@ -179,6 +151,9 @@ impl Studio {
             smoke_finish: None,
             smoke_started: Instant::now(),
         };
+        if let Some(warning) = warning {
+            studio.notify(warning);
+        }
         if demo {
             studio.make_demo();
         }
@@ -189,6 +164,9 @@ impl Studio {
     }
     fn notify(&mut self, message: impl Into<String>) {
         self.toast = Some((message.into(), Instant::now()));
+    }
+    fn fail(&mut self, message: impl Into<String>) {
+        self.error = Some(message.into());
     }
     fn record(&mut self) {
         self.history.record(&self.doc);
@@ -211,6 +189,13 @@ impl Studio {
             "Timeline" => self.page = Page::Timeline,
             "Settings" => self.page = Page::Settings,
             "Save" => self.save(false),
+            "Save as" => self.save(true),
+            "Import music" => self.import_audio(),
+            "Export" => self.start_export(),
+            "Fit" => {
+                self.canvas_zoom = 1.0;
+                self.canvas_pan = Vec2::ZERO;
+            }
             "Open" => self.request(Pending::Open),
             "New" => self.request(Pending::New),
             "Undo" | "Redo" => {
@@ -225,7 +210,6 @@ impl Studio {
                     self.time = self.doc.timing.snap(self.time);
                     self.dirty = true;
                     self.sync_audio();
-                    self.notify(action);
                 } else {
                     self.notify(format!("Nothing to {}", action.to_lowercase()));
                 }
@@ -236,65 +220,38 @@ impl Studio {
                 } else {
                     Tool::Ink
                 };
-                self.notify(if self.tool == Tool::Ink {
-                    "Ink brush"
-                } else {
-                    "Liquify · pressure preserved"
-                });
             }
             "Mirror" => {
                 self.mirror = !self.mirror;
-                self.notify(if self.mirror {
-                    "Canvas mirrored"
-                } else {
-                    "Canvas restored"
-                });
             }
             "Previous" => self.set_time(self.doc.timing.previous(self.time)),
             "Next" => self.set_time(self.doc.timing.next(self.time)),
             "Layer up" => {
                 self.layer = (self.layer + 1).min(self.doc.layers.len() - 1);
-                self.notify(format!(
-                    "Layer {} · {}",
-                    self.layer + 1,
-                    self.doc.layers[self.layer].name
-                ));
             }
             "Layer down" => {
                 self.layer = self.layer.saturating_sub(1);
-                self.notify(format!(
-                    "Layer {} · {}",
-                    self.layer + 1,
-                    self.doc.layers[self.layer].name
-                ));
             }
             "Smaller" | "Larger" => {
                 if self.drawing.is_none() {
                     self.record();
                 }
-                let width = &mut self.doc.layers[self.layer].width;
+                let width = self.doc.layers[self.layer].brush_width_mut(self.tool);
                 *width = if action == "Larger" {
                     (*width * 1.15).max(*width + 1.0)
                 } else {
                     (*width / 1.15).min(*width - 1.0)
                 }
                 .clamp(1.0, 1920.0);
-                let size = *width;
                 self.resized = Instant::now();
-                self.notify(format!("Brush · {size:.0} px"));
             }
             "Play" => self.toggle_play(),
             "Onion skin" => {
-                self.record();
-                self.doc.settings.onion.enabled = !self.doc.settings.onion.enabled;
-                self.notify(if self.doc.settings.onion.enabled {
-                    "Onion skin on"
-                } else {
-                    "Onion skin off"
-                });
+                self.preferences.onion.enabled = !self.preferences.onion.enabled;
             }
             "Fullscreen" => {
-                self.fullscreen = !self.fullscreen;
+                self.fullscreen =
+                    !ctx.input(|i| i.viewport().fullscreen.unwrap_or(self.fullscreen));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
             }
             _ => {}
@@ -322,8 +279,7 @@ impl Studio {
                     }
                     let name = key.symbol_or_name().to_string();
                     let conflict = self
-                        .doc
-                        .settings
+                        .preferences
                         .bindings
                         .iter()
                         .enumerate()
@@ -341,8 +297,7 @@ impl Studio {
                     if let Some(action) = conflict {
                         self.notify(format!("Already used by {action}"));
                     } else {
-                        self.record();
-                        let binding = &mut self.doc.settings.bindings[index];
+                        let binding = &mut self.preferences.bindings[index];
                         binding.key = name;
                         binding.control =
                             modifiers.ctrl && (cfg!(target_os = "macos") || !modifiers.command);
@@ -361,8 +316,7 @@ impl Studio {
                     continue;
                 }
                 let action = self
-                    .doc
-                    .settings
+                    .preferences
                     .bindings
                     .iter()
                     .find(|b| {
@@ -390,16 +344,24 @@ impl Studio {
             }
         }
     }
+    fn playback_time(&self) -> f64 {
+        let time = self.transport.position();
+        if self.transport.audio.is_some() {
+            self.preferences.visual_time(time)
+        } else {
+            time
+        }
+    }
     fn toggle_play(&mut self) {
         if self.transport.playing {
-            let t = self.transport.position();
+            let t = self.playback_time();
             self.set_time(t);
         } else {
             if self.time >= self.doc.timing.duration {
                 self.time = 0.0;
             }
             if let Err(error) = self.transport.play(self.time) {
-                self.notify(error);
+                self.fail(error);
             }
         }
     }
@@ -417,7 +379,7 @@ impl Studio {
         if let Some(bytes) = current {
             match DecodedAudio::decode(&bytes) {
                 Ok(audio) => self.transport.audio = Some(audio),
-                Err(e) => self.notify(e),
+                Err(e) => self.fail(e),
             }
         } else {
             self.transport.audio = None;
@@ -434,7 +396,7 @@ impl Studio {
     fn perform(&mut self, pending: Pending) {
         match pending {
             Pending::New => {
-                self.doc = Document::default();
+                self.doc = self.preferences.new_document();
                 self.history = History::default();
                 self.path = None;
                 self.layer = 0;
@@ -442,7 +404,7 @@ impl Studio {
                 self.dirty = false;
                 self.transport = Transport::default();
                 self.audio_bytes = None;
-                self.notify("New motion · 2.39:1 · four layers");
+                self.notify("New project");
             }
             Pending::Open => {
                 if let Some(path) = rfd::FileDialog::new()
@@ -541,7 +503,7 @@ impl Studio {
                         self.audio_bytes = Some(asset.bytes.clone());
                         self.doc.audio = Some(asset);
                         self.transport.audio = Some(audio);
-                        self.notify("Music imported · click the ruler to set your playhead");
+                        self.notify("Audio imported");
                     }
                     Background::Loaded(path, doc, audio) => {
                         self.path = Some(path);
@@ -558,13 +520,13 @@ impl Studio {
                     Background::Saved(path) => {
                         self.path = Some(path);
                         self.dirty = false;
-                        self.notify("Project saved · vectors + embedded music");
+                        self.notify("Saved");
                         if let Some(pending) = self.pending.take() {
                             self.perform(pending);
                         }
                     }
                     Background::Error(error) => {
-                        self.notify(error);
+                        self.fail(error);
                     }
                 }
             }
@@ -576,172 +538,9 @@ impl Studio {
             _ => {}
         }
     }
-    fn header(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("header")
-            .exact_height(68.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(BG)
-                    .inner_margin(egui::Margin::symmetric(24, 15)),
-            )
-            .show(ctx, |ui| {
-                if self.background.is_some() || self.pending.is_some() {
-                    ui.disable();
-                }
-                ui.horizontal_centered(|ui| {
-                    ui.label(RichText::new("M O R I").size(22.0).strong().color(INK));
-                    ui.add_space(12.0);
-                    ui.menu_button("File", |ui| {
-                        if ui.button("New motion").clicked() {
-                            self.request(Pending::New);
-                            ui.close_menu();
-                        }
-                        if ui.button("Open…").clicked() {
-                            self.request(Pending::Open);
-                            ui.close_menu();
-                        }
-                        if ui.button("Save").clicked() {
-                            self.save(false);
-                            ui.close_menu();
-                        }
-                        if ui.button("Save as…").clicked() {
-                            self.save(true);
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button("Import music…").clicked() {
-                            self.import_audio();
-                            ui.close_menu();
-                        }
-                    });
-                    ui.add_space(22.0);
-                    if chip(ui, "01  Canvas", self.page == Page::Canvas)
-                        .on_hover_text(self.binding("Canvas"))
-                        .clicked()
-                    {
-                        self.page = Page::Canvas;
-                    }
-                    if chip(ui, "02  Rhythm", self.page == Page::Timeline)
-                        .on_hover_text(self.binding("Timeline"))
-                        .clicked()
-                    {
-                        self.page = Page::Timeline;
-                    }
-                    if chip(ui, "Settings", self.page == Page::Settings)
-                        .on_hover_text(self.binding("Settings"))
-                        .clicked()
-                    {
-                        self.page = Page::Settings;
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui
-                            .button(if self.transport.playing {
-                                "Ⅱ  Pause"
-                            } else {
-                                "▶  Play"
-                            })
-                            .clicked()
-                        {
-                            self.toggle_play();
-                        }
-                        ui.add_space(12.0);
-                        text(
-                            ui,
-                            format!("{}{}", self.doc.name, if self.dirty { "  •" } else { "" }),
-                            12.0,
-                            MUTED,
-                        );
-                    });
-                });
-            });
-    }
-    fn binding(&self, action: &str) -> String {
-        self.doc
-            .settings
-            .bindings
-            .iter()
-            .find(|b| b.action == action)
-            .map_or(String::new(), |b| b.label())
-    }
-    fn footer(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::bottom("footer")
-            .exact_height(42.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(BG)
-                    .inner_margin(egui::Margin::symmetric(24, 9)),
-            )
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    let layer = &self.doc.layers[self.layer];
-                    ui.label(
-                        RichText::new(format!(
-                            "{:02} / {:02}",
-                            self.layer + 1,
-                            self.doc.layers.len()
-                        ))
-                        .color(ACCENT)
-                        .monospace()
-                        .size(12.0),
-                    );
-                    text(
-                        ui,
-                        format!("{}  ·  {}", layer.name, layer.blend.name()),
-                        12.0,
-                        INK,
-                    );
-                    ui.add_space(16.0);
-                    text(
-                        ui,
-                        if self.tool == Tool::Ink {
-                            "Ink"
-                        } else {
-                            "Liquify"
-                        },
-                        12.0,
-                        MUTED,
-                    );
-                    text(ui, format!("{:.0} px", layer.width), 12.0, MUTED);
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        text(ui, format!("{:.3} s", self.time), 12.0, INK);
-                        text(
-                            ui,
-                            format!(
-                                "{:.0} BPM",
-                                self.doc.timing.tempos[self.doc.timing.segment(self.time)].bpm
-                            ),
-                            11.0,
-                            MUTED,
-                        );
-                        if let Some(job) = &self.export {
-                            text(
-                                ui,
-                                format!(
-                                    "EXPORT {:.0}%",
-                                    job.frame as f32 / job.frames as f32 * 100.0
-                                ),
-                                10.0,
-                                ACCENT,
-                            );
-                        }
-                        if self.mirror {
-                            text(ui, "MIRRORED", 10.0, ACCENT);
-                        }
-                        if self.doc.settings.onion.enabled {
-                            text(ui, "ONION", 10.0, MUTED);
-                        }
-                        if let Some((message, when)) = &self.toast {
-                            if when.elapsed() < Duration::from_secs(5) {
-                                text(ui, message, 11.0, ACCENT);
-                            }
-                        }
-                    });
-                });
-            });
-    }
     fn view(&self, onion: bool) -> View {
         let mut ghosts = Vec::new();
-        let settings = &self.doc.settings.onion;
+        let settings = &self.preferences.onion;
         if onion && settings.enabled && !self.transport.playing {
             // Distinct exposure times, rather than repeating a held cel at every musical tick.
             let times: std::collections::BTreeSet<Tick> = self
@@ -779,194 +578,12 @@ impl Studio {
         }
         View {
             scene: self.doc.scene(tick(if self.transport.playing {
-                self.transport.position()
+                self.playback_time()
             } else {
                 self.time
             })),
             ghosts,
             mirror: self.mirror,
-        }
-    }
-    fn canvas_page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.horizontal(|ui| {
-            ui.add_space(16.0);
-            if chip(ui, "Ink", self.tool == Tool::Ink).clicked() {
-                self.tool = Tool::Ink;
-            }
-            if chip(ui, "Liquify", self.tool == Tool::Liquify)
-                .on_hover_text(self.binding("Liquify"))
-                .clicked()
-            {
-                self.tool = Tool::Liquify;
-            }
-            ui.separator();
-            let mut width = self.doc.layers[self.layer].width;
-            let response = ui.add(
-                egui::DragValue::new(&mut width)
-                    .range(1.0..=1920.0)
-                    .speed(0.5)
-                    .suffix(" px"),
-            );
-            if response.changed() {
-                if !self.ui_editing {
-                    self.record();
-                }
-                self.ui_editing = ctx.input(|i| i.pointer.any_down());
-                self.doc.layers[self.layer].width = width;
-                self.dirty = true;
-                self.resized = Instant::now();
-            }
-            if ui
-                .selectable_label(self.doc.settings.onion.enabled, "Onion")
-                .clicked()
-            {
-                self.action("Onion skin", ctx);
-            }
-            if ui.selectable_label(self.mirror, "Mirror").clicked() {
-                self.action("Mirror", ctx);
-            }
-            let (undo, redo) = self.history.counts();
-            if ui
-                .add_enabled(undo > 0, egui::Button::new("Undo"))
-                .on_hover_text("Undo")
-                .clicked()
-            {
-                self.action("Undo", ctx);
-            }
-            if ui
-                .add_enabled(redo > 0, egui::Button::new("Redo"))
-                .on_hover_text("Redo")
-                .clicked()
-            {
-                self.action("Redo", ctx);
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.small_button("Fit").clicked() {
-                    self.canvas_zoom = 1.0;
-                    self.canvas_pan = Vec2::ZERO;
-                }
-                text(ui, format!("{:.0}%", self.canvas_zoom * 100.0), 11.0, MUTED);
-                ui.add_space(12.0);
-                text(ui, "W / S  layer    A / D  time", 11.0, MUTED);
-            });
-        });
-        ui.add_space(8.0);
-        let bottom = 62.0;
-        let available = ui.available_rect_before_wrap();
-        let workspace = Rect::from_min_max(
-            available.min,
-            Pos2::new(available.max.x, available.max.y - bottom),
-        );
-        let ws = ui.allocate_rect(workspace, Sense::click_and_drag());
-        let padding = Vec2::new(42.0, 36.0);
-        let fit = (workspace.width() - padding.x * 2.0)
-            .min((workspace.height() - padding.y * 2.0) * self.doc.settings.aspect);
-        let size = Vec2::new(fit, fit / self.doc.settings.aspect) * self.canvas_zoom;
-        if ws.hovered() {
-            let zoom = ctx.input(|i| i.zoom_delta());
-            if zoom != 1.0 {
-                self.canvas_zoom = (self.canvas_zoom * zoom).clamp(0.2, 8.0);
-            }
-            let scroll = ctx.input(|i| i.smooth_scroll_delta);
-            if ctx.input(|i| i.modifiers.command) && scroll.y != 0.0 {
-                self.canvas_zoom = (self.canvas_zoom * (scroll.y * 0.002).exp()).clamp(0.2, 8.0);
-            }
-            if ctx.input(|i| i.pointer.middle_down()) {
-                self.canvas_pan += ctx.input(|i| i.pointer.delta());
-            }
-        }
-        let paper = Rect::from_center_size(workspace.center() + self.canvas_pan, size);
-        let visible = paper.intersect(workspace);
-        let painter = ui.painter().with_clip_rect(workspace);
-        painter.rect_filled(paper.expand(2.0), 1.0, Color32::from_black_alpha(100));
-        self.pointer_input(ctx, paper, visible);
-        painter.add(render::callback(
-            paper,
-            self.renderer.clone(),
-            self.view(true),
-        ));
-        let scale = paper.width() / 1920.0;
-        if let Some(pos) = ctx
-            .input(|i| i.pointer.hover_pos())
-            .filter(|p| visible.contains(*p))
-        {
-            ctx.set_cursor_icon(egui::CursorIcon::None);
-            self.cursor(
-                &painter,
-                pos,
-                self.doc.layers[self.layer].width * scale * 0.5,
-            );
-        } else if self.resized.elapsed() < Duration::from_millis(1200) {
-            self.cursor(
-                &painter,
-                workspace.center(),
-                self.doc.layers[self.layer].width * scale * 0.5,
-            );
-        }
-        let layer = &self.doc.layers[self.layer];
-        if layer.blend.effect() {
-            if let Some(cel) = layer.held(tick(self.time)) {
-                if let Some(stroke) = cel.strokes.last() {
-                    if let (Some(a), Some(b)) = (stroke.points.first(), stroke.points.last()) {
-                        let project = |p: &Point| {
-                            Pos2::new(
-                                paper.left() + if self.mirror { 1920.0 - p.x } else { p.x } * scale,
-                                paper.top() + p.y * scale,
-                            )
-                        };
-                        let start = project(a);
-                        let end = project(b);
-                        painter.arrow(start, end - start, UiStroke::new(1.2_f32, ACCENT));
-                        painter.circle_stroke(start, 3.0, UiStroke::new(1.0_f32, ACCENT));
-                    }
-                }
-            }
-        }
-        painter.text(
-            Pos2::new(workspace.left() + 20.0, workspace.bottom() - 14.0),
-            egui::Align2::LEFT_BOTTOM,
-            format!(
-                "{}  /  {:.2}:1",
-                if self.tool == Tool::Ink {
-                    "VECTOR INK"
-                } else {
-                    "VECTOR LIQUIFY"
-                },
-                self.doc.settings.aspect
-            ),
-            FontId::proportional(10.0),
-            MUTED,
-        );
-        ui.scope_builder(
-            egui::UiBuilder::new().max_rect(Rect::from_min_max(
-                Pos2::new(available.left() + 20.0, workspace.bottom() + 8.0),
-                available.max - Vec2::new(20.0, 0.0),
-            )),
-            |ui| {
-                self.mini_timeline(ui);
-            },
-        );
-    }
-    fn cursor(&self, p: &egui::Painter, pos: Pos2, r: f32) {
-        p.circle_stroke(
-            pos,
-            r.max(1.5),
-            UiStroke::new(3.0_f32, Color32::from_white_alpha(150)),
-        );
-        p.circle_stroke(
-            pos,
-            r.max(1.5),
-            UiStroke::new(
-                1.0_f32,
-                if self.tool == Tool::Liquify {
-                    Color32::from_rgb(154, 112, 70)
-                } else {
-                    Color32::from_gray(70)
-                },
-            ),
-        );
-        if self.tool == Tool::Liquify {
-            p.circle_filled(pos, 1.5, ACCENT);
         }
     }
     fn pointer_input(&mut self, ctx: &egui::Context, paper: Rect, visible: Rect) {
@@ -1028,8 +645,8 @@ impl Studio {
             y: (pos.y - paper.top()) / paper.width() * 1920.0,
             pressure: pressure
                 .clamp(0.0, 1.0)
-                .powf(self.doc.settings.pressure_gamma)
-                .max(self.doc.settings.minimum_pressure),
+                .powf(self.preferences.pressure_gamma)
+                .max(self.preferences.minimum_pressure),
         }
     }
     fn start_stroke(&mut self, point: Point) {
@@ -1037,7 +654,7 @@ impl Studio {
         let liquify = self.tool == Tool::Liquify;
         let time = tick(self.time);
         let layer = self.layer;
-        let width = self.doc.layers[layer].width;
+        let width = self.doc.layers[layer].brush_width(self.tool);
         let movement = self.doc.layers[layer].blend == Blend::Move;
         let cel = self.doc.layers[layer].begin_edit(time, liquify);
         let index = if liquify {
@@ -1082,7 +699,11 @@ impl Studio {
             return;
         }
         let layer = &mut self.doc.layers[drawing.layer];
-        let width = layer.width;
+        let width = layer.brush_width(if drawing.liquify {
+            Tool::Liquify
+        } else {
+            Tool::Ink
+        });
         let cel = Arc::make_mut(layer.cels.get_mut(&drawing.time).unwrap());
         if drawing.liquify {
             // Sweep the full pointer segment, keeping fast gestures continuous.
@@ -1100,7 +721,7 @@ impl Studio {
                     center,
                     [delta[0] / steps as f32, delta[1] / steps as f32],
                     radius,
-                    self.doc.settings.liquify_strength * point.pressure,
+                    self.preferences.liquify_strength * point.pressure,
                 );
             }
         } else {
@@ -1114,13 +735,13 @@ impl Studio {
                     stroke.revision = next_revision();
                 }
             } else {
-                let spacing = self.doc.settings.spacing;
+                let spacing = self.preferences.spacing;
                 let steps = (distance / spacing).ceil().max(1.0) as usize;
                 let a = drawing.last;
                 let before = drawing.previous;
                 for i in 1..=steps {
                     let t = i as f32 / steps as f32;
-                    let (x, y) = if self.doc.settings.interpolation == Interpolation::Smooth {
+                    let (x, y) = if self.preferences.interpolation == Interpolation::Smooth {
                         // Local Hermite interpolation, preserving both measured endpoints.
                         let mut tangent = [(point.x - before.x) * 0.5, (point.y - before.y) * 0.5];
                         let length = tangent[0].hypot(tangent[1]);
@@ -1150,775 +771,6 @@ impl Studio {
         drawing.previous = drawing.last;
         drawing.last = point;
     }
-    fn mini_timeline(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            if ui.small_button("‹").clicked() {
-                self.set_time(self.doc.timing.previous(self.time));
-            }
-            text(ui, format!("{:07.3}", self.time), 13.0, ACCENT);
-            if ui.small_button("›").clicked() {
-                self.set_time(self.doc.timing.next(self.time));
-            }
-            let width = ui.available_width() - 8.0;
-            let (rect, response) =
-                ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::click_and_drag());
-            let end = self
-                .doc
-                .timing
-                .duration
-                .max(self.time + self.doc.timing.step_at(self.doc.timing.segment(self.time)));
-            let p = ui.painter();
-            p.hline(
-                rect.x_range(),
-                rect.center().y,
-                UiStroke::new(1.0_f32, LINE),
-            );
-            for t in self.doc.timing.display_grid(0.0, end, rect.width()) {
-                let x = rect.left() + t as f32 / end as f32 * rect.width();
-                p.line_segment(
-                    [
-                        Pos2::new(x, rect.center().y - 3.0),
-                        Pos2::new(x, rect.center().y + 3.0),
-                    ],
-                    UiStroke::new(1.0_f32, LINE),
-                );
-            }
-            for time in self.doc.layers[self.layer].cels.keys() {
-                let x = rect.left() + seconds(*time) as f32 / end as f32 * rect.width();
-                p.circle_filled(Pos2::new(x, rect.center().y), 2.8, MUTED);
-            }
-            let x = rect.left() + self.time as f32 / end as f32 * rect.width();
-            p.circle_filled(Pos2::new(x, rect.center().y), 4.5, ACCENT);
-            if response.clicked() || response.dragged() {
-                if let Some(pos) = response.interact_pointer_pos() {
-                    self.set_time(((pos.x - rect.left()) / rect.width()) as f64 * end);
-                }
-            }
-        });
-    }
-    fn timeline_page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let rect = ui.available_rect_before_wrap();
-        let left = Rect::from_min_max(
-            rect.min + Vec2::new(20.0, 0.0),
-            Pos2::new(rect.left() + 285.0, rect.bottom()),
-        );
-        let right = Rect::from_min_max(
-            Pos2::new(left.right() + 28.0, rect.top()),
-            rect.max - Vec2::new(24.0, 0.0),
-        );
-        ui.scope_builder(egui::UiBuilder::new().max_rect(left),|ui|{
-            egui::ScrollArea::vertical().id_salt("layer_panel").auto_shrink([false,false]).max_height(left.height()).show(ui,|ui|{
-                section(ui,"COMPOSITION","Layers","Build motion from the bottom up.");
-                let mut select=None;
-                let mut toggle=None;
-                for index in (0..self.doc.layers.len()).rev(){
-                    let layer=&self.doc.layers[index];
-                    egui::Frame::new().fill(if index==self.layer{
-                        Color32::from_rgb(47,44,40)}
-                    else{
-                        PANEL}
-                    ).corner_radius(7.0).inner_margin(12.0).show(ui,|ui|{
-                        ui.set_min_width(230.0);
-                        ui.horizontal(|ui|{
-                            if ui.selectable_label(layer.visible,if layer.visible{
-                                "On"}
-                            else{
-                                "Off"}
-                            ).on_hover_text("Toggle visibility").clicked(){
-                                toggle=Some(index);
-                            }
-                            let label=format!("{:02}   {}",index+1,layer.name);
-                            if ui.selectable_label(index==self.layer,RichText::new(label).color(if index==self.layer{
-                                ACCENT}
-                            else{
-                                INK}
-                            )).clicked(){
-                                select=Some(index);
-                            }
-                        }
-                        );
-                        ui.horizontal(|ui|{
-                            ui.add_space(32.0);
-                            text(ui,format!("{}  ·  {} exposures",layer.blend.name(),layer.cels.len()),10.0,MUTED);
-                        }
-                        );
-                    }
-                    );
-                    ui.add_space(5.0);
-                }
-                if let Some(index)=select{
-                    self.layer=index;
-                }
-                if let Some(index)=toggle{
-                    self.record();
-                    self.doc.layers[index].visible= !self.doc.layers[index].visible;
-                }
-                ui.horizontal(|ui|{
-                    if ui.button("+ Layer").clicked(){
-                        self.record();
-                        self.doc.layers.push(Layer::new(&format!("Layer {}",self.doc.layers.len()+1),Blend::Xor,42.0));
-                        self.layer=self.doc.layers.len()-1;
-                    }
-                    if ui.add_enabled(self.layer>1,egui::Button::new("Down")).on_hover_text("Move down").clicked(){
-                        self.record();
-                        self.doc.layers.swap(self.layer,self.layer-1);
-                        self.layer-=1;
-                    }
-                    if ui.add_enabled(self.layer>0&&self.layer+1<self.doc.layers.len(),egui::Button::new("Up")).on_hover_text("Move up").clicked(){
-                        self.record();
-                        self.doc.layers.swap(self.layer,self.layer+1);
-                        self.layer+=1;
-                    }
-                }
-                );
-                ui.add_space(18.0);
-                ui.separator();
-                ui.add_space(10.0);
-                text(ui,"LAYER PROPERTIES",10.0,ACCENT);
-                let before=self.doc.clone();
-                let mut changed=false;
-                let layer=&mut self.doc.layers[self.layer];
-                changed|=ui.text_edit_singleline(&mut layer.name).changed();
-                if self.layer>0 {
-                    let previous=layer.blend;
-                    egui::ComboBox::from_id_salt("blend").selected_text(layer.blend.name()).width(200.0).show_ui(ui,|ui|{
-                        for blend in Blend::OVERLAYS{
-                            changed|=ui.selectable_value(&mut layer.blend,blend,blend.name()).changed();
-                        }
-                    }
-                    );
-                    if previous!=Blend::Move&&layer.blend==Blend::Move{
-                        for cel in layer.cels.values_mut(){
-                            let cel=Arc::make_mut(cel);
-                            if cel.strokes.len()>1{
-                                let last=cel.strokes.pop().unwrap();
-                                cel.strokes.clear();
-                                cel.strokes.push(last);
-                            }
-                        }
-                    }
-                }
-                changed|=ui.checkbox(&mut layer.inverted,"Invert black / white").changed();
-                changed|=ui.add(egui::Slider::new(&mut layer.width,1.0..=500.0).text("Brush").suffix(" px").logarithmic(true)).changed();
-                if layer.blend.effect(){
-                    ui.add_space(8.0);
-                    text(ui,"EFFECT CHARACTER",10.0,MUTED);
-                    egui::ComboBox::from_id_salt("shader").selected_text(layer.style.name()).width(210.0).show_ui(ui,|ui|{
-                        for style in Style::ALL{
-                            changed|=ui.selectable_value(&mut layer.style,style,style.name()).changed();
-                        }
-                    }
-                    );
-                    changed|=ui.add(egui::Slider::new(&mut layer.strength,0.0..=3.0).text("Amount")).changed();
-                    text(ui,if layer.blend==Blend::Move{
-                        "First → last point moves all layers below.\nA new gesture replaces the previous one."}
-                    else{
-                        "Each gesture adds a directional shutter.\nIts length controls the motion distance."}
-                    ,11.0,MUTED);
-                }
-                self.ui_change(&before,changed,ctx);
-                ui.add_space(12.0);
-                ui.horizontal(|ui|{
-                    if ui.add_enabled(self.doc.layers[self.layer].cels.contains_key(&tick(self.time)),egui::Button::new("Remove exposure")).on_hover_text("Resume holding the previous exposure").clicked(){
-                        self.record();
-                        self.doc.layers[self.layer].cels.remove(&tick(self.time));
-                    }
-                    if ui.add_enabled(self.layer>0,egui::Button::new("Delete layer")).clicked(){
-                        self.record();
-                        self.doc.layers.remove(self.layer);
-                        self.layer=self.layer.saturating_sub(1);
-                    }
-                }
-                );
-                if ui.button("Blank exposure here").on_hover_text("Create an empty exposure instead of holding previous content").clicked(){
-                    self.record();
-                    self.doc.layers[self.layer].cels.insert(tick(self.time),Arc::default());
-                }
-            }
-            );
-        }
-        );
-        ui.scope_builder(egui::UiBuilder::new().max_rect(right), |ui| {
-            section(
-                ui,
-                "NATIVE TIME",
-                "Find your rhythm",
-                "Music leads. Every exposure lands on a musical grid.",
-            );
-            let top = ui.available_rect_before_wrap();
-            let preview_width = (top.width() * 0.43).min(420.0);
-            let preview_size = Vec2::new(preview_width, preview_width / self.doc.settings.aspect);
-            let preview = Rect::from_min_size(
-                Pos2::new(top.right() - preview_width, top.top()),
-                preview_size,
-            );
-            ui.painter().add(render::callback(
-                preview,
-                self.renderer.clone(),
-                self.view(false),
-            ));
-            let controls = Rect::from_min_max(
-                top.min,
-                Pos2::new(preview.left() - 20.0, top.top() + preview_size.y.max(130.0)),
-            );
-            ui.scope_builder(egui::UiBuilder::new().max_rect(controls), |ui| {
-                text(ui, "SOUNDTRACK", 10.0, MUTED);
-                text(
-                    ui,
-                    self.doc
-                        .audio
-                        .as_ref()
-                        .map_or("No music imported".into(), |a| a.name.clone()),
-                    14.0,
-                    INK,
-                );
-                if let Some(audio) = &self.transport.audio {
-                    text(
-                        ui,
-                        format!(
-                            "{:.1} s  ·  {} Hz  ·  {} ch",
-                            audio.duration, audio.rate, audio.channels
-                        ),
-                        11.0,
-                        MUTED,
-                    );
-                }
-                if ui
-                    .button(if self.doc.audio.is_some() {
-                        "Replace music…"
-                    } else {
-                        "+ Import music…"
-                    })
-                    .clicked()
-                {
-                    self.import_audio();
-                }
-                ui.add_space(8.0);
-                let before = self.doc.clone();
-                let mut changed = false;
-                ui.horizontal(|ui| {
-                    text(ui, "Grid", 12.0, MUTED);
-                    egui::ComboBox::from_id_salt("grid")
-                        .selected_text(step_label(self.doc.timing.step))
-                        .show_ui(ui, |ui| {
-                            for step in [
-                                0.03125,
-                                0.0625,
-                                1.0 / 12.0,
-                                0.125,
-                                1.0 / 6.0,
-                                0.25,
-                                1.0 / 3.0,
-                                0.5,
-                                1.0,
-                                2.0,
-                            ] {
-                                changed |= ui
-                                    .selectable_value(
-                                        &mut self.doc.timing.step,
-                                        step,
-                                        step_label(step),
-                                    )
-                                    .changed();
-                            }
-                        });
-                });
-                ui.horizontal(|ui| {
-                    text(ui, "Duration", 11.0, MUTED);
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(&mut self.doc.timing.duration)
-                                .range(0.1..=86400.0)
-                                .speed(0.1)
-                                .suffix(" s"),
-                        )
-                        .changed();
-                });
-                if changed {
-                    self.time = self.doc.timing.snap(self.time);
-                }
-                self.ui_change(&before, changed, ctx);
-            });
-            ui.add_space(
-                (top.top() + preview_size.y.max(175.0) - ui.cursor().min.y).max(0.0) + 16.0,
-            );
-            ui.separator();
-            ui.add_space(14.0);
-            ui.horizontal(|ui| {
-                text(ui, "TEMPO MAP", 10.0, ACCENT);
-                if ui.small_button("+ Start point at playhead").clicked() {
-                    if self
-                        .doc
-                        .timing
-                        .tempos
-                        .iter()
-                        .any(|t| (t.start - self.time).abs() < 0.00001)
-                    {
-                        self.notify("A tempo start already exists here");
-                    } else {
-                        self.record();
-                        let bpm = self.doc.timing.tempos[self.doc.timing.segment(self.time)].bpm;
-                        self.doc.timing.tempos.push(Tempo {
-                            start: self.time,
-                            bpm,
-                        });
-                        self.doc.timing.normalize();
-                    }
-                }
-            });
-            let before = self.doc.clone();
-            let mut changed = false;
-            let mut remove = None;
-            egui::ScrollArea::vertical()
-                .id_salt("tempos")
-                .max_height(100.0)
-                .show(ui, |ui| {
-                    for (index, tempo) in self.doc.timing.tempos.iter_mut().enumerate() {
-                        ui.horizontal(|ui| {
-                            text(ui, format!("{:02}", index + 1), 11.0, MUTED);
-                            if index == 0 {
-                                text(ui, "0.000 s", 12.0, INK);
-                            } else {
-                                changed |= ui
-                                    .add(
-                                        egui::DragValue::new(&mut tempo.start)
-                                            .range(0.000001..=86400.0)
-                                            .speed(0.001)
-                                            .fixed_decimals(3)
-                                            .suffix(" s"),
-                                    )
-                                    .changed();
-                            }
-                            changed |= ui
-                                .add(
-                                    egui::DragValue::new(&mut tempo.bpm)
-                                        .range(1.0..=999.0)
-                                        .speed(0.1)
-                                        .suffix(" BPM"),
-                                )
-                                .changed();
-                            if index > 0 && ui.small_button("×").clicked() {
-                                remove = Some(index);
-                            }
-                        });
-                    }
-                });
-            if let Some(index) = remove {
-                self.doc.timing.tempos.remove(index);
-                changed = true;
-            }
-            if changed {
-                self.doc.timing.normalize();
-                self.time = self.doc.timing.snap(self.time);
-                self.transport.stop();
-            }
-            self.ui_change(&before, changed, ctx);
-            text(
-                ui,
-                "Tempo edits preserve exposure times in seconds.",
-                10.0,
-                MUTED,
-            );
-            ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                if ui
-                    .button(if self.transport.playing { "Ⅱ" } else { "▶" })
-                    .clicked()
-                {
-                    self.toggle_play();
-                }
-                text(ui, format!("{:.3} s", self.time), 18.0, ACCENT);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.add(
-                        egui::Slider::new(&mut self.timeline_zoom, 1.0..=32.0)
-                            .logarithmic(true)
-                            .text("Zoom"),
-                    );
-                });
-            });
-            self.timeline_tracks(ui);
-        });
-    }
-    fn timeline_tracks(&mut self, ui: &mut egui::Ui) {
-        let height = ui.available_height().max(160.0);
-        egui::ScrollArea::vertical()
-            .id_salt("tracks_scroll")
-            .auto_shrink([false, false])
-            .max_height(height - 25.0)
-            .show(ui, |ui| {
-                let width = ui.available_width();
-                let (rect, response) = ui.allocate_exact_size(
-                    Vec2::new(
-                        width,
-                        (height - 25.0).max(110.0 + self.doc.layers.len() as f32 * 32.0),
-                    ),
-                    Sense::click_and_drag(),
-                );
-                let label = 98.0;
-                let tracks = Rect::from_min_max(rect.min + Vec2::new(label, 0.0), rect.max);
-                let duration = self.doc.timing.duration;
-                let span = duration / self.timeline_zoom as f64;
-                self.timeline_start = self.timeline_start.clamp(0.0, (duration - span).max(0.0));
-                let start = self.timeline_start;
-                let end = start + span;
-                let p = ui.painter().with_clip_rect(rect);
-                p.rect_filled(rect, 6.0, PANEL);
-                let x = |time: f64| tracks.left() + ((time - start) / span) as f32 * tracks.width();
-                let ruler = Rect::from_min_size(tracks.min, Vec2::new(tracks.width(), 27.0));
-                for t in self.doc.timing.display_grid(start, end, tracks.width()) {
-                    let px = x(t);
-                    let segment = self.doc.timing.segment(t);
-                    let beat = (t - self.doc.timing.tempos[segment].start)
-                        * self.doc.timing.tempos[segment].bpm
-                        / 60.0;
-                    let major = (beat - beat.round()).abs() < 0.0001;
-                    if major
-                        || tracks.width() as f64 / span * self.doc.timing.step_at(segment) > 5.0
-                    {
-                        p.vline(
-                            px,
-                            rect.y_range(),
-                            UiStroke::new(
-                                1.0_f32,
-                                if major {
-                                    LINE
-                                } else {
-                                    Color32::from_rgb(36, 39, 41)
-                                },
-                            ),
-                        );
-                        if major {
-                            p.text(
-                                Pos2::new(px + 4.0, ruler.top() + 7.0),
-                                egui::Align2::LEFT_TOP,
-                                format!("{:.2}", t),
-                                FontId::proportional(10.0),
-                                MUTED,
-                            );
-                        }
-                    }
-                }
-                let wave = Rect::from_min_max(
-                    Pos2::new(tracks.left(), ruler.bottom() + 8.0),
-                    Pos2::new(tracks.right(), ruler.bottom() + 64.0),
-                );
-                p.text(
-                    Pos2::new(rect.left() + 12.0, wave.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    "AUDIO",
-                    FontId::proportional(10.0),
-                    MUTED,
-                );
-                if let Some(audio) = &self.transport.audio {
-                    let columns = wave.width().ceil() as usize;
-                    for i in 0..columns {
-                        let a =
-                            ((start + i as f64 / columns as f64 * span) * 200.0).floor() as usize;
-                        let b = ((start + (i + 1) as f64 / columns as f64 * span) * 200.0).ceil()
-                            as usize;
-                        let peak = audio
-                            .peaks
-                            .get(a.min(audio.peaks.len())..b.min(audio.peaks.len()))
-                            .unwrap_or(&[])
-                            .iter()
-                            .fold(0.0_f32, |a, v| a.max(*v));
-                        let h = peak * wave.height() * 0.44;
-                        p.line_segment(
-                            [
-                                Pos2::new(wave.left() + i as f32, wave.center().y - h),
-                                Pos2::new(wave.left() + i as f32, wave.center().y + h),
-                            ],
-                            UiStroke::new(1.0_f32, ACCENT.gamma_multiply(0.8)),
-                        );
-                    }
-                } else {
-                    p.text(
-                        wave.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "Import music to see its waveform",
-                        FontId::proportional(11.0),
-                        MUTED,
-                    );
-                }
-                let row_height = ((rect.bottom() - wave.bottom() - 12.0)
-                    / self.doc.layers.len() as f32)
-                    .clamp(24.0, 44.0);
-                for (row, index) in (0..self.doc.layers.len()).rev().enumerate() {
-                    let y = wave.bottom() + 12.0 + row as f32 * row_height;
-                    let layer = &self.doc.layers[index];
-                    if index == self.layer {
-                        p.rect_filled(
-                            Rect::from_min_size(
-                                Pos2::new(rect.left(), y),
-                                Vec2::new(rect.width(), row_height),
-                            ),
-                            0.0,
-                            ACCENT.gamma_multiply(0.075),
-                        );
-                    }
-                    p.text(
-                        Pos2::new(rect.left() + 12.0, y + row_height * 0.5),
-                        egui::Align2::LEFT_CENTER,
-                        &layer.name,
-                        FontId::proportional(11.0),
-                        if index == self.layer { ACCENT } else { MUTED },
-                    );
-                    let keys: Vec<Tick> = layer.cels.keys().copied().collect();
-                    for (i, time) in keys.iter().enumerate() {
-                        let t = seconds(*time);
-                        let next = keys.get(i + 1).map_or(duration, |t| seconds(*t));
-                        if next < start || t > end {
-                            continue;
-                        }
-                        let exposure = Rect::from_min_max(
-                            Pos2::new(x(t).max(tracks.left()), y + 6.0),
-                            Pos2::new(x(next).min(tracks.right()), y + row_height - 6.0),
-                        );
-                        p.rect_filled(
-                            exposure,
-                            3.0,
-                            if index == self.layer {
-                                ACCENT.gamma_multiply(0.25)
-                            } else {
-                                Color32::from_gray(60)
-                            },
-                        );
-                        p.circle_filled(
-                            Pos2::new(x(t), y + row_height * 0.5),
-                            3.0,
-                            if index == self.layer { ACCENT } else { MUTED },
-                        );
-                    }
-                    p.hline(
-                        rect.x_range(),
-                        y + row_height,
-                        UiStroke::new(1.0_f32, LINE.gamma_multiply(0.5)),
-                    );
-                }
-                for tempo in &self.doc.timing.tempos {
-                    if tempo.start >= start && tempo.start <= end {
-                        p.line_segment(
-                            [
-                                Pos2::new(x(tempo.start), ruler.bottom()),
-                                Pos2::new(x(tempo.start), wave.bottom()),
-                            ],
-                            UiStroke::new(1.0_f32, Color32::from_rgb(100, 145, 155)),
-                        );
-                    }
-                }
-                let playhead = x(if self.transport.playing {
-                    self.transport.position()
-                } else {
-                    self.time
-                });
-                p.vline(playhead, rect.y_range(), UiStroke::new(1.5_f32, ACCENT));
-                p.circle_filled(Pos2::new(playhead, ruler.top() + 3.0), 4.0, ACCENT);
-                if response.clicked() || response.dragged() {
-                    if let Some(pos) = response.interact_pointer_pos() {
-                        if pos.x >= tracks.left() {
-                            self.set_time(
-                                start
-                                    + ((pos.x - tracks.left()) / tracks.width()).clamp(0.0, 1.0)
-                                        as f64
-                                        * span,
-                            );
-                        }
-                        if pos.y > wave.bottom() + 12.0 {
-                            let row = ((pos.y - wave.bottom() - 12.0) / row_height) as usize;
-                            if row < self.doc.layers.len() {
-                                self.layer = self.doc.layers.len() - 1 - row;
-                            }
-                        }
-                    }
-                }
-                if self.timeline_zoom > 1.0 {
-                    ui.add(
-                        egui::Slider::new(
-                            &mut self.timeline_start,
-                            0.0..=(duration - span).max(0.0),
-                        )
-                        .show_value(false),
-                    );
-                }
-            });
-    }
-    fn ui_change(&mut self, before: &Document, changed: bool, ctx: &egui::Context) {
-        if changed {
-            if !self.ui_editing {
-                self.history.record(before);
-            }
-            self.dirty = true;
-            self.ui_editing = ctx.input(|i| i.pointer.any_down()) || ctx.wants_keyboard_input();
-        }
-    }
-    fn settings_page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        egui::ScrollArea::vertical().id_salt("settings_scroll").show(ui,|ui|{
-            ui.add_space(10.0);
-            ui.horizontal(|ui|{
-                ui.add_space(24.0);
-                ui.vertical(|ui|{
-                    section(ui,"YOUR STUDIO","Made for your hand","A few thoughtful defaults. Every detail is yours.");
-                }
-                );
-            }
-            );
-            let before=self.doc.clone();
-            let mut changed=false;
-            ui.columns(2,|cols|{
-                let ui=&mut cols[0];
-                egui::Frame::new().fill(PANEL).corner_radius(10.0).inner_margin(24.0).show(ui,|ui|{
-                    text(ui,"01  /  CANVAS & ONION SKIN",11.0,ACCENT);
-                    ui.add_space(14.0);
-                    ui.horizontal(|ui|{
-                        text(ui,"Canvas ratio",12.0,INK);
-                        changed|=ui.add(egui::DragValue::new(&mut self.doc.settings.aspect).range(0.2..=8.0).speed(0.01).fixed_decimals(3)).changed();
-                        for (name,ratio) in [("Cinema",2.39),("16:9",16.0/9.0),("1:1",1.0)]{
-                            if ui.small_button(name).clicked(){
-                                self.doc.settings.aspect=ratio;
-                                changed=true;
-                            }
-                        }
-                    }
-                    );
-                    text(ui,"Existing vector coordinates stay in place when the ratio changes.",11.0,MUTED);
-                    let onion=&mut self.doc.settings.onion;
-                    changed|=ui.checkbox(&mut onion.enabled,"Show onion skin while drawing").changed();
-                    changed|=ui.add(egui::Slider::new(&mut onion.opacity,0.0..=1.0).text("Opacity")).changed();
-                    changed|=ui.add(egui::Slider::new(&mut onion.falloff,0.0..=1.0).text("Distance falloff")).changed();
-                    ui.horizontal(|ui|{
-                        text(ui,"Previous",12.0,INK);
-                        changed|=ui.add(egui::DragValue::new(&mut onion.previous).range(0..=12)).changed();
-                        changed|=ui.color_edit_button_srgb(&mut onion.before).changed();
-                    }
-                    );
-                    ui.horizontal(|ui|{
-                        text(ui,"Following",12.0,INK);
-                        changed|=ui.add(egui::DragValue::new(&mut onion.next).range(0..=12)).changed();
-                        changed|=ui.color_edit_button_srgb(&mut onion.after).changed();
-                    }
-                    );
-                    text(ui,"Onion skins follow distinct exposures and stay out of video exports.",11.0,MUTED);
-                }
-                );
-                ui.add_space(16.0);
-                egui::Frame::new().fill(PANEL).corner_radius(10.0).inner_margin(24.0).show(ui,|ui|{
-                    text(ui,"02  /  BRUSH FEEL",11.0,ACCENT);
-                    ui.add_space(14.0);
-                    changed|=ui.add(egui::Slider::new(&mut self.doc.settings.pressure_gamma,0.2..=3.0).text("Pressure curve")).changed();
-                    changed|=ui.add(egui::Slider::new(&mut self.doc.settings.minimum_pressure,0.0..=0.5).text("Minimum size")).changed();
-                    let (rect,_)=ui.allocate_exact_size(Vec2::new(ui.available_width(),95.0),Sense::hover());
-                    let p=ui.painter();
-                    p.rect_filled(rect,4.0,BG);
-                    let mut last=rect.left_bottom();
-                    for i in 0..=100{
-                        let t=i as f32/100.0;
-                        let pressure=t.powf(self.doc.settings.pressure_gamma).max(self.doc.settings.minimum_pressure);
-                        let next=Pos2::new(rect.left()+t*rect.width(),rect.bottom()-pressure*rect.height());
-                        p.line_segment([last,next],UiStroke::new(1.8_f32,ACCENT));
-                        last=next;
-                    }
-                    ui.add_space(8.0);
-                    changed|=ui.add(egui::Slider::new(&mut self.doc.settings.spacing,0.25..=8.0).text("Sample spacing").suffix(" px")).changed();
-                    ui.horizontal(|ui|{
-                        text(ui,"Interpolation",12.0,INK);
-                        egui::ComboBox::from_id_salt("interpolation").selected_text(format!("{:?}",self.doc.settings.interpolation)).show_ui(ui,|ui|{
-                            changed|=ui.selectable_value(&mut self.doc.settings.interpolation,Interpolation::Smooth,"Smooth · Hermite").changed();
-                            changed|=ui.selectable_value(&mut self.doc.settings.interpolation,Interpolation::Linear,"Linear").changed();
-                        }
-                        );
-                    }
-                    );
-                    changed|=ui.add(egui::Slider::new(&mut self.doc.settings.liquify_strength,0.05..=1.0).text("Liquify strength")).changed();
-                    text(ui,"Pen pressure controls diameter. Mouse input uses full pressure.\nLiquify changes geometry while preserving every point’s pressure.",11.0,MUTED);
-                }
-                );
-                let ui=&mut cols[1];
-                egui::Frame::new().fill(PANEL).corner_radius(10.0).inner_margin(24.0).show(ui,|ui|{
-                    text(ui,"03  /  EXPORT MOTION",11.0,ACCENT);
-                    ui.add_space(14.0);
-                    let settings=&mut self.doc.settings.export;
-                    ui.horizontal(|ui|{
-                        text(ui,"Width",12.0,INK);
-                        changed|=ui.add(egui::DragValue::new(&mut settings.width).range(64..=7680).speed(2).suffix(" px")).changed();
-                        text(ui,format!("× {}",((settings.width as f32/self.doc.settings.aspect/2.0).round() as u32*2).max(2)),12.0,MUTED);
-                    }
-                    );
-                    ui.horizontal(|ui|{
-                        text(ui,"Frame rate",12.0,INK);
-                        changed|=ui.add(egui::DragValue::new(&mut settings.fps).range(1..=240).suffix(" FPS")).changed();
-                    }
-                    );
-                    ui.horizontal(|ui|{
-                        text(ui,"Range",12.0,INK);
-                        changed|=ui.add(egui::DragValue::new(&mut settings.start).range(0.0..=86400.0).speed(0.1).suffix(" s")).changed();
-                        text(ui,"to",12.0,MUTED);
-                        changed|=ui.add(egui::DragValue::new(&mut settings.end).range(0.001..=86400.0).speed(0.1).suffix(" s")).changed();
-                    }
-                    );
-                    changed|=ui.add(egui::Slider::new(&mut settings.crf,0..=30).text("CRF · lower is finer")).changed();
-                    changed|=ui.checkbox(&mut settings.audio,"Include soundtrack").changed();
-                    text(ui,"MP4 / H.264  ·  AAC  ·  exact musical timestamps\nNearest exposure; no blended or invented animation frames.",11.0,MUTED);
-                    ui.add_space(12.0);
-                    if ui.add_enabled(self.export.is_none()&&settings.end>settings.start,egui::Button::new(RichText::new("Export video…").color(BG)).fill(ACCENT).min_size(Vec2::new(180.0,36.0))).clicked(){
-                        self.start_export();
-                    }
-                    if let Some(job)=&self.export{
-                        ui.add(egui::ProgressBar::new(job.frame as f32/job.frames as f32).text(format!("{} / {} frames",job.frame,job.frames)));
-                    }
-                    if self.export.is_some()&&ui.button("Cancel export").clicked(){
-                        self.export=None;
-                        self.notify("Export cancelled");
-                    }
-                    text(ui,"Requires FFmpeg. Editor overlays stay out of the export.",10.0,MUTED);
-                }
-                );
-                ui.add_space(16.0);
-                egui::Frame::new().fill(PANEL).corner_radius(10.0).inner_margin(24.0).show(ui,|ui|{
-                    ui.horizontal(|ui|{
-                        text(ui,"04  /  KEYBOARD",11.0,ACCENT);
-                        ui.with_layout(Layout::right_to_left(Align::Center),|ui|{
-                            if ui.small_button("Reset").clicked(){
-                                self.doc.settings.bindings=default_bindings();
-                                changed=true;
-                                self.bind_capture=None;
-                            }
-                        }
-                        );
-                    }
-                    );
-                    ui.add_space(8.0);
-                    text(ui,"Click a shortcut, then press its new combination. Esc cancels.",11.0,MUTED);
-                    let mut capture=None;
-                    egui::Grid::new("shortcuts").num_columns(2).min_col_width(140.0).spacing([16.0,6.0]).show(ui,|ui|{
-                        for (i,binding) in self.doc.settings.bindings.iter().enumerate(){
-                            text(ui,&binding.action,12.0,INK);
-                            if ui.button(RichText::new(if self.bind_capture==Some(i){
-                                "Press keys…".into()}
-                            else{
-                                binding.label()}
-                            ).color(if self.bind_capture==Some(i){
-                                ACCENT}
-                            else{
-                                MUTED}
-                            )).clicked(){
-                                capture=Some(i);
-                            }
-                            ui.end_row();
-                        }
-                    }
-                    );
-                    if let Some(index)=capture{
-                        self.bind_capture=Some(index);
-                    }
-                }
-                );
-            }
-            );
-            self.ui_change(&before,changed,ctx);
-            ui.add_space(30.0);
-        }
-        );
-    }
     fn start_export(&mut self) {
         self.transport.stop();
         if let Some(path) = rfd::FileDialog::new()
@@ -1926,12 +778,14 @@ impl Studio {
             .set_file_name(format!("{}.mp4", self.doc.name))
             .save_file()
         {
-            match ExportJob::start(&path, &self.doc) {
+            let mut document = self.doc.clone();
+            self.preferences.apply_output(&mut document.settings.export);
+            match ExportJob::start(&path, &document) {
                 Ok(job) => {
                     self.export = Some(job);
                     self.notify("Export started");
                 }
-                Err(e) => self.notify(e),
+                Err(e) => self.fail(e),
             }
         }
     }
@@ -1989,7 +843,7 @@ impl Studio {
             }
             match result {
                 Ok(path) => self.notify(format!("Video saved · {}", path.display())),
-                Err(e) => self.notify(e),
+                Err(e) => self.fail(e),
             }
         }
     }
@@ -2154,8 +1008,123 @@ impl Studio {
                 std::fs::write(directory.join(format!("{name}.ppm")), ppm).unwrap();
                 outputs.push(format!("{name}: {black} non-white pixels"));
             }
+            // Blur regressions: all styles stay inside the swept, pressure-sized footprint.
+            let mut local_doc = Document::default();
+            local_doc.settings.aspect = 2.0;
+            let mut base = Cel::default();
+            for x in [200.0, 800.0, 1400.0] {
+                let mut stroke = Stroke::new(
+                    18.0,
+                    Point {
+                        x,
+                        y: 100.0,
+                        pressure: 1.0,
+                    },
+                );
+                stroke.points.push(Point {
+                    x,
+                    y: 860.0,
+                    pressure: 1.0,
+                });
+                base.strokes.push(Arc::new(stroke));
+            }
+            local_doc.layers[0].cels.insert(0, Arc::new(base));
+            let original =
+                unsafe { renderer.read_frame(gl, &local_doc.scene(0), [384, 192]) }.unwrap();
+            let mut blur_stroke = Stroke::new(
+                200.0,
+                Point {
+                    x: 600.0,
+                    y: 480.0,
+                    pressure: 1.0,
+                },
+            );
+            blur_stroke.points.push(Point {
+                x: 1000.0,
+                y: 480.0,
+                pressure: 1.0,
+            });
+            local_doc.layers[3].cels.insert(
+                0,
+                Arc::new(Cel {
+                    strokes: vec![Arc::new(blur_stroke)],
+                }),
+            );
+            for style in Style::ALL {
+                for inverted in [false, true] {
+                    local_doc.layers[3].style = style;
+                    local_doc.layers[3].inverted = inverted;
+                    let blurred =
+                        unsafe { renderer.read_frame(gl, &local_doc.scene(0), [384, 192]) }
+                            .unwrap();
+                    let mut changed_inside = 0;
+                    for y in 0..192 {
+                        for x in 0..384 {
+                            let i = (y * 384 + x) * 4;
+                            let px = x as f32 * 5.0 + 2.5;
+                            let py = (191 - y) as f32 * 5.0 + 2.5;
+                            let inside =
+                                (495.0..=1105.0).contains(&px) && (375.0..=585.0).contains(&py);
+                            let changed = original[i..i + 4] != blurred[i..i + 4];
+                            assert!(
+                                !changed || inside,
+                                "Blur {:?} changed pixels outside its trajectory",
+                                style
+                            );
+                            changed_inside += usize::from(changed);
+                        }
+                    }
+                    assert!(changed_inside > 50, "Local blur had no effect");
+                }
+            }
+            local_doc.layers[3].style = Style::Clean;
+            local_doc.layers[3].inverted = false;
+            let once = unsafe { renderer.read_frame(gl, &local_doc.scene(0), [384, 192]) }.unwrap();
+            let mut second = Stroke::new(
+                120.0,
+                Point {
+                    x: 1300.0,
+                    y: 650.0,
+                    pressure: 1.0,
+                },
+            );
+            second.points.push(Point {
+                x: 1500.0,
+                y: 650.0,
+                pressure: 1.0,
+            });
+            Arc::make_mut(local_doc.layers[3].cels.get_mut(&0).unwrap())
+                .strokes
+                .push(Arc::new(second));
+            let twice =
+                unsafe { renderer.read_frame(gl, &local_doc.scene(0), [384, 192]) }.unwrap();
+            let mut second_changes = 0;
+            for y in 0..192 {
+                for x in 0..384 {
+                    let i = (y * 384 + x) * 4;
+                    if x < 230 {
+                        assert_eq!(
+                            once[i..i + 4],
+                            twice[i..i + 4],
+                            "Second blur gesture changed the first region"
+                        );
+                    } else {
+                        second_changes += usize::from(once[i..i + 4] != twice[i..i + 4]);
+                    }
+                }
+            }
+            assert!(second_changes > 20, "Second blur stroke did not survive");
+            outputs.push(
+                "Local blur: all styles/inversions preserve outside pixels; two strokes survive"
+                    .into(),
+            );
+            unsafe {
+                renderer.verify_blur_directions(gl);
+            }
+            outputs
+                .push("Local blur: curved tangents, pressure and coverage verified on GPU".into());
             let mut pressure_doc = Document::default();
-            pressure_doc.settings.onion.enabled = false;
+
             let stroke = Stroke::new(
                 200.0,
                 Point {
@@ -2240,7 +1209,8 @@ impl Studio {
                 bytes: Arc::new(wav),
             });
             project::save(&directory.join("roundtrip.mori"), &document).unwrap();
-            let loaded = project::load(&directory.join("roundtrip.mori")).unwrap();
+            let mut loaded = project::load(&directory.join("roundtrip.mori")).unwrap();
+            loaded.settings.export.width = 640;
             let cancelled_path = directory.join("cancelled.mp4");
             std::fs::write(&cancelled_path, b"previous video").unwrap();
             let cancelled = ExportJob::start(&cancelled_path, &loaded).unwrap();
@@ -2256,19 +1226,12 @@ impl Studio {
         }
     }
 }
-fn step_label(step: f64) -> String {
-    if step < 1.0 {
-        format!("1/{} beat", (1.0 / step).round() as u32)
-    } else {
-        format!("{step:.0} beat")
-    }
-}
 impl eframe::App for Studio {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.poll_background();
         if let Some(error) = self.transport.take_error() {
             self.time = self.doc.timing.snap(self.transport.position());
-            self.notify(error);
+            self.fail(error);
         }
         if ctx.input(|i| i.viewport().close_requested())
             && !self.allow_close
@@ -2281,7 +1244,7 @@ impl eframe::App for Studio {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         if self.transport.playing {
-            let time = self.transport.position();
+            let time = self.playback_time();
             if time >= self.doc.timing.duration {
                 self.transport.stop();
                 self.time = self.doc.timing.snap(self.doc.timing.duration);
@@ -2294,14 +1257,14 @@ impl eframe::App for Studio {
             self.ui_editing = false;
         }
         self.keyboard(ctx);
-        self.header(ctx);
-        self.footer(ctx);
+        if self.window_page != self.page {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(
+                self.page != Page::Canvas,
+            ));
+            self.window_page = self.page;
+        }
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(BG)
-                    .inner_margin(egui::Margin::symmetric(12, 8)),
-            )
+            .frame(egui::Frame::new().fill(BG).inner_margin(0))
             .show(ctx, |ui| {
                 ui.add_enabled_ui(self.background.is_none() && self.pending.is_none(), |ui| {
                     match self.page {
@@ -2312,17 +1275,21 @@ impl eframe::App for Studio {
                 });
             });
         self.confirmation(ctx);
-        if let Some(message) = &self.busy {
-            egui::Window::new("Working")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(message);
-                    });
-                });
+        if let Some(error) = self.error.take() {
+            rfd::MessageDialog::new()
+                .set_title("MORI")
+                .set_level(rfd::MessageLevel::Error)
+                .set_description(error)
+                .show();
+        }
+        if self.page != Page::Canvas {
+            self.feedback(ctx);
+        }
+        if let Err(error) = self.preference_store.save_if_changed(&self.preferences) {
+            self.notify(error);
+        }
+        if self.busy.is_some() {
+            ctx.set_cursor_icon(egui::CursorIcon::Wait);
             ctx.request_repaint_after(Duration::from_millis(30));
         }
         if self.toast.is_some() {

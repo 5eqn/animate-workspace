@@ -2,6 +2,7 @@ mod app;
 mod audio;
 mod export;
 mod model;
+mod preferences;
 mod project;
 mod render;
 mod tablet;
@@ -9,7 +10,8 @@ mod tablet;
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("MORI — Motion in rhythm")
+            .with_title("MORI")
+            .with_decorations(false)
             .with_icon(
                 eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png"))
                     .expect("Bundled app icon"),

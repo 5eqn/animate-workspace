@@ -47,26 +47,48 @@ pub struct View {
 fn bytes(values: &[f32]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(values.as_ptr().cast(), std::mem::size_of_val(values)) }
 }
-fn disk(out: &mut Vec<f32>, x: f32, y: f32, r: f32) {
+fn vertex(out: &mut Vec<f32>, x: f32, y: f32, flow: [f32; 2]) {
+    out.extend_from_slice(&[x, y, flow[0], flow[1]]);
+}
+fn direction(stroke: &Stroke, index: usize) -> [f32; 2] {
+    let p = stroke.points[index];
+    let (a, b) = if index > 0 {
+        (stroke.points[index - 1], p)
+    } else {
+        (p, *stroke.points.get(1).unwrap_or(&p))
+    };
+    let distance = a.distance(b);
+    let radius = stroke.width * p.pressure * 0.5;
+    if distance > 0.00001 {
+        [
+            (b.x - a.x) / distance * radius,
+            (b.y - a.y) / distance * radius,
+        ]
+    } else {
+        [radius, 0.0]
+    }
+}
+fn disk(out: &mut Vec<f32>, x: f32, y: f32, r: f32, flow: [f32; 2]) {
     const N: usize = 96;
     for i in 0..N {
         let a = i as f32 / N as f32 * std::f32::consts::TAU;
         let b = (i + 1) as f32 / N as f32 * std::f32::consts::TAU;
-        out.extend_from_slice(&[
-            x,
-            y,
-            x + a.cos() * r,
-            y + a.sin() * r,
-            x + b.cos() * r,
-            y + b.sin() * r,
-        ]);
+        vertex(out, x, y, flow);
+        vertex(out, x + a.cos() * r, y + a.sin() * r, flow);
+        vertex(out, x + b.cos() * r, y + b.sin() * r, flow);
     }
 }
 fn append_geometry(stroke: &Stroke, from: usize) -> Vec<f32> {
     let mut vertices = Vec::new();
     if from == 0 {
         if let Some(p) = stroke.points.first() {
-            disk(&mut vertices, p.x, p.y, stroke.width * p.pressure * 0.5);
+            disk(
+                &mut vertices,
+                p.x,
+                p.y,
+                stroke.width * p.pressure * 0.5,
+                direction(stroke, 0),
+            );
         }
     }
     for i in from.max(1)..stroke.points.len() {
@@ -81,18 +103,16 @@ fn append_geometry(stroke: &Stroke, from: usize) -> Vec<f32> {
         let nx = (p.y - a.y) / length;
         let ny = -(p.x - a.x) / length;
         let q = [
-            a.x + nx * ra,
-            a.y + ny * ra,
-            a.x - nx * ra,
-            a.y - ny * ra,
-            p.x + nx * r,
-            p.y + ny * r,
-            p.x - nx * r,
-            p.y - ny * r,
+            [a.x + nx * ra, a.y + ny * ra],
+            [a.x - nx * ra, a.y - ny * ra],
+            [p.x + nx * r, p.y + ny * r],
+            [p.x - nx * r, p.y - ny * r],
         ];
-        vertices.extend_from_slice(&[
-            q[0], q[1], q[2], q[3], q[4], q[5], q[2], q[3], q[6], q[7], q[4], q[5],
-        ]);
+        let fa = direction(stroke, i - 1);
+        let fp = direction(stroke, i);
+        for (idx, flow) in [(0, fa), (1, fa), (2, fp), (1, fa), (3, fp), (2, fp)] {
+            vertex(&mut vertices, q[idx][0], q[idx][1], flow);
+        }
         if i >= 2 {
             let before = stroke.points[i - 2];
             let previous = before.distance(a);
@@ -107,14 +127,9 @@ fn append_geometry(stroke: &Stroke, from: usize) -> Vec<f32> {
                 for j in 0..steps {
                     let t0 = angle + turn * j as f32 / steps as f32;
                     let t1 = angle + turn * (j + 1) as f32 / steps as f32;
-                    vertices.extend_from_slice(&[
-                        a.x,
-                        a.y,
-                        a.x + t0.cos() * ra,
-                        a.y + t0.sin() * ra,
-                        a.x + t1.cos() * ra,
-                        a.y + t1.sin() * ra,
-                    ]);
+                    vertex(&mut vertices, a.x, a.y, fa);
+                    vertex(&mut vertices, a.x + t0.cos() * ra, a.y + t0.sin() * ra, fa);
+                    vertex(&mut vertices, a.x + t1.cos() * ra, a.y + t1.sin() * ra, fa);
                 }
             }
         }
@@ -181,7 +196,7 @@ impl Renderer {
         gl.renderbuffer_storage_multisample(
             glow::RENDERBUFFER,
             4.min(gl.get_parameter_i32(glow::MAX_SAMPLES)),
-            glow::RGBA8,
+            glow::RGBA16F,
             size[0],
             size[1],
         );
@@ -202,7 +217,7 @@ impl Renderer {
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
                 0,
-                glow::RGBA8 as i32,
+                glow::RGBA16F as i32,
                 size[0],
                 size[1],
                 0,
@@ -278,7 +293,10 @@ impl Renderer {
         });
         // Arc copy-on-write can restore an older stroke with the same ID after undo.
         // Rebuild on point count shrink or changed geometry revision.
-        if mesh.revision != stroke.revision || mesh.points > stroke.points.len() {
+        if mesh.revision != stroke.revision
+            || mesh.points > stroke.points.len()
+            || (mesh.points == 1 && stroke.points.len() > 1)
+        {
             mesh.points = 0;
             mesh.count = 0;
             mesh.body_count = 0;
@@ -288,14 +306,26 @@ impl Renderer {
             let mut vertices = append_geometry(stroke, mesh.points);
             let body_added = vertices.len();
             if let Some(p) = stroke.points.last() {
-                disk(&mut vertices, p.x, p.y, stroke.width * p.pressure * 0.5);
+                disk(
+                    &mut vertices,
+                    p.x,
+                    p.y,
+                    stroke.width * p.pressure * 0.5,
+                    direction(stroke, stroke.points.len() - 1),
+                );
             }
             let needed = mesh.body_count + vertices.len();
             if needed > mesh.capacity {
                 let mut all = append_geometry(stroke, 0);
                 mesh.body_count = all.len();
                 if let Some(p) = stroke.points.last() {
-                    disk(&mut all, p.x, p.y, stroke.width * p.pressure * 0.5);
+                    disk(
+                        &mut all,
+                        p.x,
+                        p.y,
+                        stroke.width * p.pressure * 0.5,
+                        direction(stroke, stroke.points.len() - 1),
+                    );
                 }
                 mesh.capacity = all.len().next_power_of_two();
                 gl.buffer_data_size(
@@ -319,8 +349,10 @@ impl Renderer {
         }
         mesh.last_used = self.frame;
         gl.enable_vertex_attrib_array(0);
-        gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 8, 0);
-        gl.draw_arrays(glow::TRIANGLES, 0, (mesh.count / 2) as i32);
+        gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 16, 0);
+        gl.enable_vertex_attrib_array(1);
+        gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, 16, 8);
+        gl.draw_arrays(glow::TRIANGLES, 0, (mesh.count / 4) as i32);
     }
     unsafe fn scene(
         &mut self,
@@ -343,11 +375,19 @@ impl Renderer {
             if layer.blend.effect() && layer.cel.strokes.is_empty() {
                 continue;
             }
-            if !layer.blend.effect() {
+            if layer.blend != crate::model::Blend::Move {
+                let blur = layer.blend == crate::model::Blend::Blur;
+                // Blur is one vector field for the whole layer. Local tangents and pressure
+                // are interpolated by the GPU; unrelated pixels never run the blur kernel.
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.msaa.unwrap().0));
-                gl.clear_color(1.0, 1.0, 1.0, 1.0);
+                if blur {
+                    gl.clear_color(0.0, 0.0, 0.0, 0.0);
+                } else {
+                    gl.clear_color(1.0, 1.0, 1.0, 1.0);
+                }
                 gl.clear(glow::COLOR_BUFFER_BIT);
                 gl.use_program(Some(self.ink));
+                Self::uniform_i(gl, self.ink, "flow_mode", blur as i32);
                 gl.uniform_2_f32(
                     gl.get_uniform_location(self.ink, "canvas").as_ref(),
                     1920.0,
@@ -357,6 +397,7 @@ impl Renderer {
                     self.mesh(gl, stroke);
                 }
                 gl.disable_vertex_attrib_array(0);
+                gl.disable_vertex_attrib_array(1);
                 gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.msaa.unwrap().0));
                 gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.targets[2].framebuffer));
                 gl.blit_framebuffer(
@@ -372,7 +413,7 @@ impl Renderer {
                     glow::NEAREST,
                 );
             }
-            let motions = if layer.blend.effect() {
+            let motions = if layer.blend == crate::model::Blend::Move {
                 layer
                     .cel
                     .strokes
@@ -397,6 +438,11 @@ impl Renderer {
                     (layer.inverted && pass + 1 == motions.len()) as i32,
                 );
                 Self::uniform_f(gl, self.composite, "strength", layer.strength);
+                gl.uniform_2_f32(
+                    gl.get_uniform_location(self.composite, "canvas").as_ref(),
+                    1920.0,
+                    1920.0 / scene.aspect,
+                );
                 gl.uniform_2_f32(
                     gl.get_uniform_location(self.composite, "motion").as_ref(),
                     motion[0] / 1920.0,
@@ -531,6 +577,70 @@ impl Renderer {
         gl.viewport(viewport[0], viewport[1], viewport[2], viewport[3]);
         result
     }
+    pub unsafe fn verify_blur_directions(&mut self, gl: &glow::Context) {
+        use crate::model::*;
+        let mut document = Document::default();
+        document.settings.aspect = 2.0;
+        let mut stroke = Stroke::new(
+            160.0,
+            Point {
+                x: 400.0,
+                y: 250.0,
+                pressure: 0.5,
+            },
+        );
+        stroke.points.extend([
+            Point {
+                x: 800.0,
+                y: 250.0,
+                pressure: 0.5,
+            },
+            Point {
+                x: 800.0,
+                y: 700.0,
+                pressure: 1.0,
+            },
+        ]);
+        document.layers[3].cels.insert(
+            0,
+            Arc::new(Cel {
+                strokes: vec![Arc::new(stroke)],
+            }),
+        );
+        self.read_frame(gl, &document.scene(0), [384, 192]).unwrap();
+        let framebuffer = gl.get_parameter_framebuffer(glow::FRAMEBUFFER_BINDING);
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.targets[2].framebuffer));
+        let sample = |x: i32, y: i32| {
+            let mut bytes = [0_u8; 16];
+            gl.read_pixels(
+                x,
+                191 - y,
+                1,
+                1,
+                glow::RGBA,
+                glow::FLOAT,
+                glow::PixelPackData::Slice(Some(&mut bytes)),
+            );
+            [
+                f32::from_ne_bytes(bytes[0..4].try_into().unwrap()),
+                f32::from_ne_bytes(bytes[4..8].try_into().unwrap()),
+                f32::from_ne_bytes(bytes[12..16].try_into().unwrap()),
+            ]
+        };
+        let horizontal = sample(120, 50);
+        assert!(
+            (horizontal[0] - 40.0).abs() < 1.0 && horizontal[1].abs() < 0.1 && horizontal[2] > 0.99,
+            "Horizontal field lost pressure or direction: {horizontal:?}"
+        );
+        let vertical = sample(160, 130);
+        assert!(
+            vertical[1] > 60.0 && vertical[1] > vertical[0].abs() * 4.0 && vertical[2] > 0.99,
+            "Curved field ignores local tangent: {vertical:?}"
+        );
+        let outside = sample(20, 20);
+        assert_eq!(outside[2], 0.0);
+        gl.bind_framebuffer(glow::FRAMEBUFFER, framebuffer);
+    }
     pub unsafe fn destroy(&mut self, gl: &glow::Context) {
         for mesh in self.meshes.drain().map(|(_, m)| m) {
             gl.delete_buffer(mesh.buffer);
@@ -593,7 +703,7 @@ mod tests {
         stroke.width = 1920.0;
         assert_eq!(append_geometry(&stroke, 0).len(), thin);
         assert!(
-            thin < 40000,
+            thin < 80000,
             "Round disks must not be repeated at every sample"
         );
     }
