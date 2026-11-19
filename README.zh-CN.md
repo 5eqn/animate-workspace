@@ -105,7 +105,9 @@ cargo build --release --locked
 
 `scripts/ui-*-smoke.py` 中的桌面测试使用 Pillow、xdotool 和 1440 × 960 的显示环境。音频拖入测试还使用 python3-xlib。截图来自实际运行的应用。测试可以通过 `MORI_PREFERENCES_PATH` 使用独立的设置文件。
 
-排查本机帧率时，可以运行 `./scripts/run.sh --trace-frames` 并持续移动笔尖或鼠标。终端会输出实际帧间隔、CPU 提交耗时和 GPU 信息，不强制 GPU 同步。
+运行 `./scripts/run.sh --debug-fps` 可以显示帧率调试面板，分别统计画板绘制 FPS、应用更新、指针事件和绘制间隔，不额外请求刷新。画板 FPS 统计绘制回调，不代表屏幕实际扫描次数。
+
+排查本机帧率时，可以运行 `./scripts/run.sh --trace-frames` 并持续移动笔尖或鼠标。终端会输出应用更新间隔、CPU 提交耗时和 GPU 信息，不强制 GPU 同步。
 
 目前在 Linux 本地验证，并对 macOS 原生模块进行 Apple Silicon 编译检查。Huion 数位屏、原生菜单和音画同步仍需在 Mac 上实测。
 

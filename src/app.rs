@@ -1828,6 +1828,7 @@ impl eframe::App for Studio {
                 }
             }
         }
+        crate::timing::overlay(ctx);
         if self.smoke.is_some() || self.smoke_finish.is_some() {
             if let Some(gl) = frame.gl() {
                 self.smoke_test(ctx, gl);
