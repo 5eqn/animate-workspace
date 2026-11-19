@@ -1157,6 +1157,10 @@ impl Studio {
             std::fs::create_dir_all(&directory).unwrap();
             let mut renderer = self.renderer.lock().unwrap();
             let mut outputs = Vec::new();
+            unsafe {
+                renderer.verify_sampler_bindings(gl);
+            }
+            outputs.push("All compositor samplers are complete and do not alias the output, including watermark-only and movement-only scenes".into());
             outputs.push(unsafe { renderer.verify_retained_rasters(gl) });
 
             let mut fill = Document::default();
@@ -1720,6 +1724,7 @@ impl Studio {
 }
 impl eframe::App for Studio {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        crate::timing::frame(ctx, frame);
         let language_at_frame_start = self.preferences.language;
         i18n::use_language(ctx, self.preferences.language, &self.system_locale);
         let chinese = self.preferences.language.chinese(&self.system_locale);

@@ -2,6 +2,58 @@
 use super::*;
 
 impl Renderer {
+    pub unsafe fn verify_sampler_bindings(&mut self, gl: &glow::Context) {
+        use crate::model::*;
+        let framebuffer = gl.get_parameter_framebuffer(glow::FRAMEBUFFER_BINDING);
+        self.ensure_size(gl, [384, 192]).unwrap();
+        let verify = |renderer: &mut Self, scene: &Scene| {
+            // No dependence on whatever egui or a previous pass left bound.
+            for slot in [0, 1] {
+                gl.active_texture(glow::TEXTURE0 + slot);
+                gl.bind_texture(glow::TEXTURE_2D, None);
+            }
+            let front = renderer.render_scene(gl, scene, [384, 192]).unwrap();
+            for slot in [0, 1] {
+                gl.active_texture(glow::TEXTURE0 + slot);
+                let texture = gl
+                    .get_parameter_texture(glow::TEXTURE_BINDING_2D)
+                    .expect("Composite sampler is unbound");
+                assert!(gl.is_texture(texture));
+                assert_ne!(
+                    texture, renderer.targets[front].texture,
+                    "Composite samples its own output"
+                );
+                assert_eq!(
+                    gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER),
+                    glow::LINEAR as i32
+                );
+            }
+            assert_eq!(gl.get_error(), glow::NO_ERROR);
+        };
+        let mut doc = Document::default();
+        doc.layers.clear();
+        verify(self, &doc.scene(0)); // A white page with only the rhythm watermark.
+        doc.settings.watermark = false;
+        let mut layer = Layer::new("Move", Blend::Move, 42.0);
+        let mut stroke = Stroke::new(
+            42.0,
+            Point {
+                x: 100.0,
+                y: 100.0,
+                pressure: 1.0,
+                angle: 0.0,
+            },
+        );
+        stroke.points.push(Point {
+            x: 120.0,
+            ..stroke.points[0]
+        });
+        layer.begin_edit(0, false).strokes.push(Arc::new(stroke));
+        doc.layers.push(layer);
+        verify(self, &doc.scene(0));
+        gl.bind_framebuffer(glow::FRAMEBUFFER, framebuffer);
+        gl.active_texture(glow::TEXTURE0);
+    }
     pub unsafe fn verify_retained_rasters(&mut self, gl: &glow::Context) -> String {
         use crate::{curve::StrokeSmoother, model::*};
         let size = [960, 402];

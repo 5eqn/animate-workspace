@@ -10,8 +10,10 @@ mod preferences;
 mod project;
 mod render;
 mod tablet;
+mod timing;
 
 fn main() -> eframe::Result {
+    timing::initialize();
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("MORI")

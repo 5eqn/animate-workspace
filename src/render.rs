@@ -284,6 +284,7 @@ impl Renderer {
             }
             Ok(program)
         }
+        crate::timing::gpu(gl);
         let full = include_str!("../shaders/fullscreen.vert");
         Ok(Self {
             ink: program(
@@ -504,6 +505,17 @@ impl Renderer {
         self.scene_rasters.push(SceneRaster { key, target });
         Ok(target)
     }
+    unsafe fn bind_composite_inputs(
+        &self,
+        gl: &glow::Context,
+        below: glow::Texture,
+        ink: glow::Texture,
+    ) {
+        // AppKit's GL driver validates every active sampler, including those in
+        // branches skipped by mode. Always bind both; neither can be the draw target.
+        Self::texture(gl, self.composite, "below", 0, below);
+        Self::texture(gl, self.composite, "ink", 1, ink);
+    }
     unsafe fn uniform_i(gl: &glow::Context, p: glow::Program, key: &str, v: i32) {
         gl.uniform_1_i32(gl.get_uniform_location(p, key).as_ref(), v);
     }
@@ -621,7 +633,11 @@ impl Renderer {
             let next = 1 - front;
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.targets[next].framebuffer));
             gl.use_program(Some(self.composite));
-            Self::texture(gl, self.composite, "below", 0, self.targets[front].texture);
+            self.bind_composite_inputs(
+                gl,
+                self.targets[front].texture,
+                self.targets[front].texture,
+            );
             Self::uniform_i(gl, self.composite, "mode", 6);
             gl.uniform_2_i32(
                 gl.get_uniform_location(self.composite, "rhythm_grid")
@@ -739,16 +755,12 @@ impl Renderer {
                 let next = 1 - front;
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.targets[next].framebuffer));
                 gl.use_program(Some(self.composite));
-                Self::texture(gl, self.composite, "below", 0, self.targets[front].texture);
-                if layer.blend != crate::model::Blend::Move {
-                    Self::texture(
-                        gl,
-                        self.composite,
-                        "ink",
-                        1,
-                        self.layer_rasters[&layer_index].target.texture,
-                    );
-                }
+                let ink = if layer.blend == crate::model::Blend::Move {
+                    self.targets[front].texture
+                } else {
+                    self.layer_rasters[&layer_index].target.texture
+                };
+                self.bind_composite_inputs(gl, self.targets[front].texture, ink);
                 Self::uniform_i(gl, self.composite, "mode", layer.blend.shader_id());
                 Self::uniform_i(gl, self.composite, "style", layer.style.id());
                 Self::uniform_i(
@@ -802,6 +814,13 @@ impl Renderer {
         mut info: egui::PaintCallbackInfo,
         view: &View,
     ) {
+        let _timer = crate::timing::canvas(
+            [
+                info.viewport_in_pixels().width_px.max(1) as u32,
+                info.viewport_in_pixels().height_px.max(1) as u32,
+            ],
+            info.pixels_per_point,
+        );
         self.frame += 1;
         let framebuffer = gl.get_parameter_framebuffer(glow::FRAMEBUFFER_BINDING);
         info.clip_rect = info.clip_rect.intersect(info.viewport);

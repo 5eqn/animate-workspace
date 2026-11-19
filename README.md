@@ -105,6 +105,8 @@ cargo build --release --locked
 
 Desktop tests in `scripts/ui-*-smoke.py` use Pillow, xdotool and a 1440 × 960 display. The audio-drop test also uses python3-xlib. Screenshots come from the running application. Tests can use `MORI_PREFERENCES_PATH` to keep settings separate.
 
+For native frame pacing diagnosis, run `./scripts/run.sh --trace-frames` and move the pointer continuously. The terminal reports actual frame intervals, CPU submission time and GPU identity without forcing GPU synchronization.
+
 Validation runs locally on Linux, with Apple Silicon compilation checks for native macOS modules. Huion hardware, native menus and audio alignment still need testing on a Mac.
 
 Fonts: [Inter](https://rsms.me/inter/) ([license](assets/fonts/OFL.txt)) and [Noto Sans CJK SC](https://github.com/notofonts/noto-cjk) ([license](assets/fonts/NotoSansSC-LICENSE.txt)).
