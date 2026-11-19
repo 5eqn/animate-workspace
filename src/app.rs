@@ -282,6 +282,26 @@ impl Studio {
                     self.notify(format!("Nothing to {}", action.to_lowercase()));
                 }
             }
+            "Blank frame" | "Copy previous frame" if self.page == Page::Canvas => {
+                self.transport.stop();
+                let time = tick(self.time);
+                if action == "Copy previous frame"
+                    && self.doc.layers[self.layer]
+                        .cels
+                        .range(..time)
+                        .next_back()
+                        .is_none()
+                {
+                    self.notify("No previous frame");
+                    return;
+                }
+                self.record();
+                if action == "Blank frame" {
+                    self.doc.blank_frame(self.layer, time);
+                } else {
+                    self.doc.copy_previous_frame(self.layer, time);
+                }
+            }
             "Mirror" => {
                 self.mirror = !self.mirror;
             }
@@ -1137,62 +1157,6 @@ impl Studio {
             std::fs::create_dir_all(&directory).unwrap();
             let mut renderer = self.renderer.lock().unwrap();
             let mut outputs = Vec::new();
-            // Moving or blurring near a page edge retains the vector content
-            // beyond that edge; only the final camera rectangle is cropped.
-            for blur in [false, true] {
-                let mut edge = Document::default();
-                edge.settings.watermark = false;
-                edge.layers.truncate(1);
-                let dot = Point {
-                    x: 0.0,
-                    y: 200.0,
-                    pressure: 1.0,
-                    angle: 0.0,
-                };
-                edge.layers[0]
-                    .begin_edit(0, false)
-                    .strokes
-                    .push(Arc::new(Stroke::new(80.0, dot)));
-                if blur {
-                    let mut layer = Layer::new("Blur", Blend::Blur, 120.0);
-                    layer
-                        .begin_edit(0, false)
-                        .strokes
-                        .push(Arc::new(Stroke::new(120.0, dot)));
-                    edge.layers.push(layer);
-                }
-                let mut reference = edge.clone();
-                for layer in &mut reference.layers {
-                    for stroke in &mut Arc::make_mut(layer.cels.get_mut(&0).unwrap()).strokes {
-                        let stroke = Arc::make_mut(stroke);
-                        stroke.id = next_revision();
-                        for point in &mut stroke.points {
-                            point.x += 200.0;
-                        }
-                    }
-                }
-                let mut movement = Layer::new("Move", Blend::Move, 100.0);
-                let mut path = Stroke::new(100.0, dot);
-                path.points.push(Point { x: 200.0, ..dot });
-                movement.begin_edit(0, false).strokes.push(Arc::new(path));
-                edge.layers.push(movement);
-                let actual =
-                    unsafe { renderer.read_frame(gl, &edge.scene(0), [960, 402]).unwrap() };
-                let expected = unsafe {
-                    renderer
-                        .read_frame(gl, &reference.scene(0), [960, 402])
-                        .unwrap()
-                };
-                let mismatch = actual
-                    .iter()
-                    .zip(&expected)
-                    .filter(|(a, b)| a.abs_diff(**b) > 4)
-                    .count();
-                assert!(
-                    mismatch < 200,
-                    "Off-canvas geometry was cropped: {mismatch}, blur={blur}"
-                );
-            }
             let mut fill = Document::default();
             fill.settings.watermark = false;
             fill.layers.truncate(1);
@@ -1208,26 +1172,15 @@ impl Studio {
                 .begin_edit(0, false)
                 .strokes
                 .push(Arc::new(stroke));
-            let mut movement = Layer::new("Move", Blend::Move, 100.0);
-            let mut path = Stroke::new(100.0, point);
-            path.points.push(Point {
-                x: 1700.0,
-                y: 600.0,
-                ..point
-            });
-            movement.begin_edit(0, false).strokes.push(Arc::new(path));
-            fill.layers.push(movement);
             let pixels = unsafe { renderer.read_frame(gl, &fill.scene(0), [960, 402]).unwrap() };
-            assert!(
-                pixels
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .all(|p| p[0] < 3 && p[1] < 3 && p[2] < 3),
-                "Fill lost its infinite coverage after movement"
+            assert!(pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| p[0] < 3 && p[1] < 3 && p[2] < 3));
+            outputs.push(
+                "Fill paints the canvas black with ordinary canvas-sized render targets".into(),
             );
-            outputs.push("Off-canvas dots and local blur move into view intact; infinite fill stays black after translation".into());
-
             for (name, blend, style) in [
                 ("ink", Blend::Base, Style::Clean),
                 ("move", Blend::Move, Style::Clean),

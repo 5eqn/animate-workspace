@@ -109,6 +109,24 @@ impl Default for Preferences {
 }
 impl Preferences {
     pub fn migrate_shortcuts(&mut self) {
+        for binding in default_bindings()
+            .into_iter()
+            .filter(|b| matches!(b.action.as_str(), "Blank frame" | "Copy previous frame"))
+        {
+            if !self.bindings.iter().any(|b| b.action == binding.action) {
+                let mut binding = binding;
+                if self.bindings.iter().any(|other| {
+                    other.key == binding.key
+                        && other.command == binding.command
+                        && other.control == binding.control
+                        && other.alt == binding.alt
+                        && other.shift == binding.shift
+                }) {
+                    binding.key.clear();
+                }
+                self.bindings.push(binding);
+            }
+        }
         let legacy = |action: &str, key: &str| {
             self.bindings.iter().any(|b| {
                 b.action == action && b.key == key && !b.command && !b.control && !b.alt && !b.shift
@@ -218,11 +236,12 @@ impl Preferences {
             && self
                 .bindings
                 .iter()
-                .all(|b| eframe::egui::Key::from_name(&b.key).is_some())
+                .all(|b| b.key.is_empty() || eframe::egui::Key::from_name(&b.key).is_some())
             && self.bindings.iter().enumerate().all(|(i, b)| {
                 self.bindings[i + 1..].iter().all(|other| {
                     b.action != other.action
-                        && !(b.key == other.key
+                        && !(!b.key.is_empty()
+                            && b.key == other.key
                             && b.control == other.control
                             && b.command == other.command
                             && b.alt == other.alt
@@ -248,11 +267,16 @@ impl PreferenceStore {
         let mut warning = None;
         let preferences = match fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice::<Preferences>(&bytes) {
-                Ok(mut p) if p.valid() => {
+                Ok(mut p) => {
                     p.bindings
                         .retain(|b| !matches!(b.action.as_str(), "Fit" | "Liquify"));
                     p.migrate_shortcuts();
-                    p
+                    if p.valid() {
+                        p
+                    } else {
+                        warning = Some("Could not read preferences".into());
+                        Preferences::default()
+                    }
                 }
                 _ => {
                     warning = Some("Could not read preferences".into());
@@ -471,6 +495,57 @@ mod new_default_tests {
 #[cfg(test)]
 mod settings_transfer_tests {
     use super::*;
+    #[test]
+    fn adding_frame_shortcuts_preserves_older_preferences_and_custom_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        let mut old = Preferences {
+            spacing: 3.0,
+            ..Default::default()
+        };
+        old.bindings
+            .retain(|b| !matches!(b.action.as_str(), "Blank frame" | "Copy previous frame"));
+        let used_key = if cfg!(target_os = "macos") {
+            "Backspace"
+        } else {
+            "Delete"
+        };
+        old.bindings
+            .iter_mut()
+            .find(|b| b.action == "Mirror")
+            .unwrap()
+            .key = used_key.into();
+        fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        let (_, loaded, warning) = PreferenceStore::at(path);
+        assert!(warning.is_none());
+        assert_eq!(loaded.spacing, 3.0);
+        assert!(loaded.valid());
+        assert_eq!(
+            loaded
+                .bindings
+                .iter()
+                .find(|b| b.action == "Mirror")
+                .unwrap()
+                .key,
+            used_key
+        );
+        assert!(loaded
+            .bindings
+            .iter()
+            .find(|b| b.action == "Blank frame")
+            .unwrap()
+            .key
+            .is_empty());
+        assert_eq!(
+            loaded
+                .bindings
+                .iter()
+                .find(|b| b.action == "Copy previous frame")
+                .unwrap()
+                .key,
+            "D"
+        );
+    }
     #[test]
     fn follow_and_eraser_defaults_migrate_and_persist_independently() {
         let mut legacy = serde_json::to_value(Preferences::default()).unwrap();

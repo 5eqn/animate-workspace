@@ -136,7 +136,7 @@ with tempfile.TemporaryDirectory(prefix='mori-ui-') as temporary:
         key('d');brush('round');click(500,400)
         assert min(shot('new-drawing').getpixel((1000,600))[:3])>240
         brush('eraser');click(500,400)
-        assert max(shot('empty-frame-falls-back').getpixel((1000,600))[:3])<5,'Empty frame did not disappear and hold the previous fill'
+        assert min(shot('empty-frame-retained').getpixel((1000,600))[:3])>240,'Erasing removed the empty frame'
         key('ctrl+z');assert min(shot('empty-frame-undo').getpixel((1000,600))[:3])>240
         # Move layers always use the move cursor, for every tool.
         key('w');key('w')
@@ -149,4 +149,4 @@ with tempfile.TemporaryDirectory(prefix='mori-ui-') as temporary:
         assert process.poll() is None
     finally:
         process.terminate();process.wait(timeout=10)
-print('Track and frame-head feedback, all-lane scrubbing, frame handles, local brushes, Fill and empty-frame fallback: passed')
+print('Track and frame-head feedback, all-lane scrubbing, frame handles, local brushes, Fill and retained empty frames: passed')

@@ -12,8 +12,8 @@ uniform float strength;
 uniform ivec2 rhythm_grid;
 uniform int rhythm_filled;
 uniform ivec2 pixel_size;
-uniform ivec2 pixel_origin;
 vec3 paper(vec2 p) {
+    if (any(lessThan(p,vec2(0.0))) || any(greaterThan(p,vec2(1.0)))) return vec3(1.0);
     return texture(below,p).rgb;
 }
 vec3 hsv(vec3 c) {
@@ -22,14 +22,14 @@ vec3 hsv(vec3 c) {
 }
 void main() {
     if(mode==6){
-        vec3 base=texelFetch(below,ivec2(gl_FragCoord.xy),0).rgb;
+        vec3 base=paper(uv);
         int cell=max(2,int(floor(float(pixel_size.x)*5.0/1920.0)));
         int gap=max(1,int(floor(float(pixel_size.x)*2.0/1920.0)));
         int margin=max(8,int(floor(float(pixel_size.x)*24.0/1920.0)));
         ivec2 extent=rhythm_grid*(cell+gap)-gap;
         // All edges are integer framebuffer coordinates; no filtering/AA on the blocks.
         ivec2 origin=ivec2(pixel_size.x-margin-extent.x,margin);
-        ivec2 p=ivec2(floor(gl_FragCoord.xy))-pixel_origin-origin;
+        ivec2 p=ivec2(floor(gl_FragCoord.xy))-origin;
         if(all(greaterThanEqual(p,ivec2(0)))&&all(lessThan(p,extent))){
             ivec2 index=p/(cell+gap);ivec2 local=p%(cell+gap);
             if(all(lessThan(local,ivec2(cell)))){
@@ -40,8 +40,8 @@ void main() {
         color=vec4(base,1.0);return;
     }
 
-    vec3 a=texelFetch(below,ivec2(gl_FragCoord.xy),0).rgb;
-    vec3 b=texelFetch(ink,ivec2(gl_FragCoord.xy),0).rgb;
+    vec3 a=paper(uv);
+    vec3 b=texture(ink,uv).rgb;
     if (inverted) b=1.0-b;
     vec2 d=motion*strength;
     if (mode==0) color=vec4(b,1.0);
@@ -60,7 +60,7 @@ void main() {
         color=vec4(inverted ? 1.0-moved : moved,1.0);
     }
     if (mode==5) {
-        vec4 field=texelFetch(ink,ivec2(gl_FragCoord.xy),0);
+        vec4 field=texture(ink,uv);
         float coverage=field.a;
         if(coverage<=0.0) { color=vec4(a,1.0); return; }
         d=vec2(field.x/canvas.x,-field.y/canvas.y)/coverage*strength;

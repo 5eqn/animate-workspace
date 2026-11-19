@@ -12,5 +12,6 @@
   "New project":"新工程", "Audio imported":"音频已导入", "Project opened":"工程已打开", "Saved":"已保存", "Export started":"开始导出", "Export cancelled":"导出已取消", "Save your motion?":"保存工程？", "Your project has unsaved changes.":"当前工程有尚未保存的修改。", "A video is exporting. Closing will cancel it.":"视频正在导出，关闭会取消导出。", "Save & continue":"保存并继续", "Discard changes":"放弃修改", "Stop export & close":"取消导出并关闭", "MORI project":"MORI 工程", "Music":"音频", "MP4 video":"MP4 视频",
   "Could not read preferences":"无法读取偏好设置", "Preferences are invalid":"偏好设置无效", "Cannot export settings":"无法导出设置", "Paper":"底稿", "Ink":"墨迹", "Movement":"位移", "Atmosphere":"氛围", "Untitled motion":"未命名动画", "Layer":"图层", "Nothing to undo":"没有可撤回的操作", "Nothing to redo":"没有可重做的操作", "Opening project…":"正在打开工程…", "Saving vectors and music…":"正在保存…", "Reading music and waveform…":"正在读取音频…", "Background operation ended unexpectedly":"后台操作意外结束", "Already used by":"已分配给", "Video saved":"视频已保存",
   "Eraser":"橡皮擦", "Follow playback":"播放时跟随", "File":"文件", "Save as…":"另存为…", "Export video…":"导出视频…",
-  "Fill":"油漆桶", "Division":"每拍细分", "Default division":"默认每拍细分", "Previous frames":"之前的帧", "Following frames":"之后的帧"
+  "Fill":"油漆桶", "Division":"每拍细分", "Default division":"默认每拍细分", "Previous frames":"之前的帧", "Following frames":"之后的帧",
+  "Blank frame":"创建空帧", "Copy previous frame":"复制上一帧", "Copy frame":"复制", "Delete frame":"删除", "No previous frame":"没有可复制的上一帧"
 }

@@ -266,9 +266,6 @@ impl Layer {
     pub fn erase_at(&mut self, time: Tick, hits: &std::collections::HashSet<u64>) {
         let cel = self.begin_edit(time, true);
         cel.strokes.retain(|stroke| !hits.contains(&stroke.id));
-        if cel.strokes.is_empty() {
-            self.cels.remove(&time);
-        }
     }
     pub fn begin_edit(&mut self, time: Tick, liquify: bool) -> &mut Cel {
         if !self.cels.contains_key(&time) {
@@ -525,7 +522,11 @@ impl Binding {
                 ""
             },
             if self.shift { "Shift " } else { "" },
-            self.key
+            if self.key.is_empty() {
+                "—"
+            } else {
+                &self.key
+            }
         )
     }
 }
@@ -552,6 +553,18 @@ pub fn default_bindings() -> Vec<Binding> {
         ("Import music", "I", true, false, false),
         ("Export", "E", true, false, false),
         ("Save as", "S", true, false, true),
+        (
+            "Blank frame",
+            if cfg!(target_os = "macos") {
+                "Backspace"
+            } else {
+                "Delete"
+            },
+            false,
+            false,
+            false,
+        ),
+        ("Copy previous frame", "D", false, false, true),
     ]
     .into_iter()
     .map(|(a, k, c, o, s)| Binding {
@@ -684,6 +697,49 @@ impl Document {
                 self.settings.export.end = self.timing.duration;
             }
         }
+    }
+    pub fn blank_frame(&mut self, layer: usize, time: Tick) {
+        self.layers[layer]
+            .cels
+            .insert(tick(self.timing.snap(seconds(time))), Arc::default());
+    }
+    pub fn copy_previous_frame(&mut self, layer: usize, time: Tick) -> bool {
+        let time = tick(self.timing.snap(seconds(time)));
+        let Some(source) = self.layers[layer]
+            .cels
+            .range(..time)
+            .next_back()
+            .map(|(_, cel)| cel.clone())
+        else {
+            return false;
+        };
+        self.layers[layer].cels.insert(time, source);
+        true
+    }
+    pub fn copy_frame_forward(&mut self, layer: usize, from: Tick) -> Option<Tick> {
+        let source = self.layers[layer].cels.get(&from)?.clone();
+        let dest = tick(self.timing.next(seconds(from)));
+        let mut positions = vec![dest];
+        while self.layers[layer]
+            .cels
+            .contains_key(positions.last().unwrap())
+        {
+            positions.push(tick(self.timing.next(seconds(*positions.last().unwrap()))));
+        }
+        for pair in positions.windows(2).rev() {
+            let cel = self.layers[layer].cels.remove(&pair[0]).unwrap();
+            self.layers[layer].cels.insert(pair[1], cel);
+        }
+        self.layers[layer].cels.insert(dest, source);
+        let last = seconds(*positions.last().unwrap());
+        if last >= self.timing.duration {
+            let old = self.timing.duration;
+            self.timing.duration = self.timing.next(last);
+            if (self.settings.export.end - old).abs() < 1e-6 {
+                self.settings.export.end = self.timing.duration;
+            }
+        }
+        Some(dest)
     }
     pub fn move_exposure(&mut self, layer: usize, from: Tick, to: Tick) -> bool {
         let to = tick(self.timing.snap(seconds(to)));
@@ -1272,7 +1328,7 @@ mod local_brush_and_division_tests {
         assert_eq!(restored.layers[2].brush, Brush::Eraser);
     }
     #[test]
-    fn erasing_the_last_stroke_removes_the_frame_and_holds_the_prior_frame() {
+    fn erasing_the_last_stroke_keeps_an_empty_frame() {
         let point = Point {
             x: 0.0,
             y: 0.0,
@@ -1285,7 +1341,78 @@ mod local_brush_and_division_tests {
         layer.begin_edit(0, false).strokes.push(prior.clone());
         layer.begin_edit(10, false).strokes.push(current.clone());
         layer.erase_at(10, &std::collections::HashSet::from([current.id]));
-        assert!(!layer.cels.contains_key(&10));
-        assert_eq!(layer.held(10).unwrap().strokes[0].id, prior.id);
+        assert!(layer.cels.contains_key(&10));
+        assert!(layer.held(10).unwrap().strokes.is_empty());
+        assert_eq!(layer.held(0).unwrap().strokes[0].id, prior.id);
+    }
+}
+
+#[cfg(test)]
+mod frame_edit_tests {
+    use super::*;
+    fn drawing(x: f32) -> Arc<Cel> {
+        Arc::new(Cel {
+            strokes: vec![Arc::new(Stroke::new(
+                10.0,
+                Point {
+                    x,
+                    y: 50.0,
+                    pressure: 1.0,
+                    angle: 0.0,
+                },
+            ))],
+        })
+    }
+    #[test]
+    fn blank_and_previous_copy_are_independent_and_undoable() {
+        let mut doc = Document::default();
+        let mut history = History::default();
+        doc.layers[0].cels.insert(0, drawing(1.0));
+        doc.layers[0].cels.insert(tick(0.125), drawing(2.0));
+        history.record(&doc);
+        doc.blank_frame(0, tick(0.125));
+        assert!(doc.layers[0].held(tick(0.2)).unwrap().strokes.is_empty());
+        assert!(history.undo(&mut doc));
+        assert_eq!(doc.layers[0].cels[&tick(0.125)].strokes[0].points[0].x, 2.0);
+        assert!(history.redo(&mut doc));
+        assert!(doc.copy_previous_frame(0, tick(0.125)));
+        let copy = doc.layers[0].begin_edit(tick(0.125), true);
+        Arc::make_mut(&mut copy.strokes[0]).points[0].x = 20.0;
+        assert_eq!(doc.layers[0].cels[&0].strokes[0].points[0].x, 1.0);
+        assert!(!doc.copy_previous_frame(1, 0));
+    }
+    #[test]
+    fn forward_copy_pushes_collisions_across_tempo_boundaries_and_keeps_gaps() {
+        let mut doc = Document::default();
+        doc.timing.add_start(0.0625);
+        doc.timing.tempos[1].division = 4.0;
+        for (time, x) in [(0.0, 1.0), (0.0625, 2.0), (0.1875, 3.0), (0.5625, 4.0)] {
+            doc.layers[0].cels.insert(tick(time), drawing(x));
+        }
+        let dest = doc.copy_frame_forward(0, 0).unwrap();
+        assert_eq!(dest, tick(0.0625));
+        let frames = &doc.layers[0].cels;
+        for (time, x) in [
+            (0.0, 1.0),
+            (0.0625, 1.0),
+            (0.1875, 2.0),
+            (0.3125, 3.0),
+            (0.5625, 4.0),
+        ] {
+            assert_eq!(frames[&tick(time)].strokes[0].points[0].x, x);
+        }
+        assert_eq!(frames.len(), 5);
+        assert!(doc.copy_frame_forward(1, 0).is_none());
+    }
+    #[test]
+    fn copying_last_frame_extends_duration_and_empty_frames_can_be_copied() {
+        let mut doc = Document::default();
+        doc.timing.duration = 0.125;
+        doc.settings.export.end = 0.125;
+        doc.blank_frame(0, tick(0.0625));
+        assert_eq!(doc.copy_frame_forward(0, tick(0.0625)), Some(tick(0.125)));
+        assert_eq!(doc.timing.duration, 0.1875);
+        assert_eq!(doc.settings.export.end, 0.1875);
+        assert!(doc.layers[0].cels[&tick(0.125)].strokes.is_empty());
     }
 }

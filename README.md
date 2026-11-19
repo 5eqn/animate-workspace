@@ -16,7 +16,7 @@ Hold the right mouse button to open the brush wheel. Move toward an icon and rel
 - **Marker** draws with a flat rectangular tip. Pen tilt turns the tip; pressure changes its size.
 - **Liquify** pushes existing lines around without changing their thickness.
 - **Eraser** removes an entire stroke when you touch it, including when you move quickly.
-- **Fill** paints the whole layer black, extending beyond the page. Moving the layers above it keeps the background black.
+- **Fill** paints the whole layer black. It is represented as a single stroke, so the eraser can remove it in one touch.
 
 You can tap to make a dot, or press harder without moving to grow it. A mouse works at full pressure. Each layer remembers its chosen brush and a separate size for each adjustable brush. The second layer starts with Marker.
 
@@ -32,13 +32,13 @@ Brush settings let you adjust pressure, smoothness and default sizes. **Sample s
 
 ![Music and layer tracks](docs/screenshots/rhythm.png)
 
-Click or drag across the timeline to move through time. The playhead snaps to the beat grid while you drag. Hovering highlights the track and previews the grid position; hovering a frame's small diamond highlights its handle. Drag that handle to move the frame. Dropping it on another frame swaps them.
+Click or drag across the timeline to move through time. The playhead snaps to the beat grid while you drag. Hovering highlights the track and previews the grid position; hovering a frame's small diamond highlights its handle. Drag that handle to move the frame. Dropping it on another frame swaps them. Right-click a frame handle to copy it to the next grid position or delete it. Copying shifts overlapping frames forward. Deleting a frame lets the preceding drawing continue.
 
 Scroll to pan. Pinch, or hold Command / Ctrl while scrolling, to zoom around the pointer. Middle-button dragging also pans. Playback follows the playhead by default. You can turn this off in **Playback**. Pausing normally returns both the playhead and the timeline view to where playback began; **Keep playhead** keeps your current place instead.
 
 Double-click the tempo lane to add a BPM point. Right-click a point to set its BPM, **Division**, bars per group and beats per bar. Division is the number of steps in one beat: the default **8** gives eight positions per beat. Each point has its own setting; new points inherit the previous point's values. Changing the beat grid moves drawings to the nearest step. If two frames would overlap on one layer, later frames move forward to the next free steps.
 
-A layer keeps showing its last drawing until you change it. At a new time, Round, Marker or Fill starts a new drawing. Liquify and Eraser start from the previous drawing. If you erase every stroke in a frame, that frame disappears and the previous drawing continues. Undo and redo let you revisit your edits without a fixed step limit.
+A layer keeps showing its last drawing until you change it. At a new time, Round, Marker or Fill starts a new drawing. Liquify and Eraser start from the previous drawing. Erasing every stroke leaves an empty frame. In P1, Del creates an empty frame at the current time; Shift+D copies the previous frame here as an independent drawing. Undo and redo let you revisit your edits without a fixed step limit.
 
 ## Layers
 
@@ -51,7 +51,7 @@ New projects have a widescreen 2.39:1 page and four layers. Click a layer name t
 | Move | One stroke moves everything below it by the distance from its start to its end. A new stroke replaces the previous one. Its cursor is a move symbol for every brush. |
 | Motion blur | Blurs the picture below only where you paint, along the direction of your strokes. |
 
-Move and Motion blur include Essential, Staccato echoes, Chromatic prism and Neon ribbons styles, with color in the latter two. Strokes continue beyond the page edges, so a dot on an edge can move into view as a complete dot. The page is cropped only for the final picture.
+Move and Motion blur include Essential, Staccato echoes, Chromatic prism and Neon ribbons styles, with color in the latter two. Rendering uses the page rectangle; Move and Motion blur sample the rendered picture within that rectangle.
 
 The small rhythm blocks at the bottom right show the current beat. The default is two rows of four blocks: one turns black each beat and the group resets after two bars. A BPM point's bars and beats determine the arrangement. The blocks sit beneath your layers, so your drawing and effects also affect them. Turn them off for this project, or change their default for new projects, in **Project** settings.
 

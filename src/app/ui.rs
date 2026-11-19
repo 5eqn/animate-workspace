@@ -1250,9 +1250,37 @@ impl Studio {
                     self.set_time(time);
                 }
             }
+            let frame_menu_id = Id::new(("frame_menu_target", i));
+            if context.secondary_clicked() {
+                let target = context.interact_pointer_pos().and_then(frame_head);
+                ctx.data_mut(|data| data.insert_temp(frame_menu_id, target));
+            }
+            let frame_target = ctx
+                .data(|data| data.get_temp::<Option<Tick>>(frame_menu_id))
+                .flatten();
             for response in [&label_response, &context] {
                 response.context_menu(|ui| {
                     menu_surface(ui);
+                    if response.id == context.id {
+                        if let Some(time) = frame_target {
+                            if ui.button(tr_ui(ui, "Copy frame")).clicked() {
+                                self.layer = i;
+                                self.transport.stop();
+                                if let Some(dest) = self.doc.copy_frame_forward(i, time) {
+                                    self.time = seconds(dest);
+                                    changed = true;
+                                }
+                                ui.close_menu();
+                            }
+                            if ui.button(tr_ui(ui, "Delete frame")).clicked() {
+                                self.layer = i;
+                                self.set_time(seconds(time));
+                                changed |= self.doc.layers[i].cels.remove(&time).is_some();
+                                ui.close_menu();
+                            }
+                            return;
+                        }
+                    }
                     let can_delete = self.doc.layers.len() > 1;
                     let layer = &mut self.doc.layers[i];
                     changed |= ui
@@ -1360,7 +1388,7 @@ impl Studio {
     }
     fn ui_change(&mut self, before: &Document, changed: bool, ctx: &egui::Context) {
         if changed {
-            if before.timing != self.doc.timing {
+            if before.timing.tempos != self.doc.timing.tempos {
                 let source = self.timing_origin.get_or_insert_with(|| before.clone());
                 // A continuous BPM edit always regrids the original exposures, preventing
                 // cumulative drift/collisions while dragging a value through many samples.
