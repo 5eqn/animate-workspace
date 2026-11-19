@@ -33,12 +33,25 @@ pub fn save(path: &Path, document: &Document) -> Result<(), String> {
 pub fn load(path: &Path) -> Result<Document, String> {
     let file = File::open(path).map_err(|e| e.to_string())?;
     let mut archive = ZipArchive::new(file).map_err(|e| e.to_string())?;
-    let mut document: Document = serde_json::from_reader(
+    let mut saved: serde_json::Value = serde_json::from_reader(
         archive
             .by_name("document.json")
             .map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
+    // The movement blend was removed. Do not reinterpret its effect strokes as
+    // drawing ink; discard those layers when opening an older project.
+    if let Some(layers) = saved.get_mut("layers").and_then(|v| v.as_array_mut()) {
+        layers.retain(|layer| layer.get("blend").and_then(|v| v.as_str()) != Some("Move"));
+    }
+    let mut document: Document = serde_json::from_value(saved).map_err(|e| e.to_string())?;
+    if document.layers.is_empty() {
+        document.layers.push(crate::model::Layer::new(
+            "Paper",
+            crate::model::Blend::Xor,
+            6.0,
+        ));
+    }
     if let Some(audio) = &mut document.audio {
         let mut bytes = Vec::new();
         archive
@@ -68,6 +81,43 @@ pub fn load(path: &Path) -> Result<Document, String> {
 mod tests {
     use super::*;
     #[test]
+    fn opening_legacy_projects_removes_movement_layers_and_keeps_other_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.mori");
+        let doc = Document::default();
+        let mut saved = serde_json::to_value(&doc).unwrap();
+        let mut movement = saved["layers"][0].clone();
+        movement["blend"] = "Move".into();
+        movement["name"] = "Old movement".into();
+        saved["layers"]
+            .as_array_mut()
+            .unwrap()
+            .insert(1, movement.clone());
+        let write = |saved: &serde_json::Value| {
+            let mut zip = ZipWriter::new(File::create(&path).unwrap());
+            zip.start_file("document.json", SimpleFileOptions::default())
+                .unwrap();
+            serde_json::to_writer(&mut zip, saved).unwrap();
+            zip.finish().unwrap();
+        };
+        write(&saved);
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.layers.len(), 3);
+        assert_eq!(
+            loaded
+                .layers
+                .iter()
+                .map(|l| l.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Paper", "Ink", "Atmosphere"]
+        );
+        saved["layers"] = serde_json::json!([movement]);
+        write(&saved);
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.layers.len(), 1);
+        assert_eq!(loaded.layers[0].blend, crate::model::Blend::Xor);
+    }
+    #[test]
     fn project_round_trip_embeds_audio_and_vectors() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.mori");
@@ -78,8 +128,21 @@ mod tests {
             }),
             ..Default::default()
         };
+        let point = crate::model::Point {
+            x: 120.0,
+            y: 80.0,
+            pressure: 0.6,
+            angle: 0.3,
+        };
+        doc.layers[0]
+            .begin_edit(0, false)
+            .strokes
+            .push(Arc::new(crate::model::Stroke::new(24.0, point)));
+        doc.layers[0].begin_edit(0, true).translate([160.0, -40.0]);
         save(&path, &doc).unwrap();
         let loaded = load(&path).unwrap();
+        assert_eq!(loaded.layers[0].cels[&0].translation, [160.0, -40.0]);
+        assert_eq!(loaded.layers[0].cels[&0].strokes[0].points[0], point);
         assert_eq!(loaded.audio.unwrap().bytes.as_slice(), [1, 2, 3, 4]);
         doc.name = "Replaced".into();
         save(&path, &doc).unwrap();

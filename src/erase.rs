@@ -276,6 +276,7 @@ mod tests {
         let mut fill = Stroke::new(42.0, p(0.0, 0.0));
         fill.brush = Brush::Fill;
         let cel = Cel {
+            translation: [0.0; 2],
             strokes: vec![Arc::new(fill)],
         };
         let mut index = EraserIndex::new(&cel);
@@ -288,6 +289,7 @@ mod tests {
     #[test]
     fn fast_pressure_changes_do_not_erase_beside_the_light_end() {
         let cel = Cel {
+            translation: [0.0; 2],
             strokes: vec![
                 Arc::new(Stroke::new(2.0, p(10.0, 8.0))),
                 Arc::new(Stroke::new(2.0, p(90.0, 8.0))),
@@ -307,6 +309,7 @@ mod tests {
         let dab = Stroke::new(8.0, p(60.0, 50.0));
         let untouched = Stroke::new(10.0, p(200.0, 200.0));
         let cel = Cel {
+            translation: [0.0; 2],
             strokes: vec![Arc::new(stroke), Arc::new(dab), Arc::new(untouched)],
         };
         let mut index = EraserIndex::new(&cel);
@@ -327,6 +330,7 @@ mod tests {
         let mut marker = Stroke::new(40.0, p(0.0, 0.0));
         marker.brush = Brush::Marker;
         let mut cel = Cel {
+            translation: [0.0; 2],
             strokes: vec![Arc::new(marker)],
         };
         let mut index = EraserIndex::new(&cel);
@@ -339,6 +343,7 @@ mod tests {
         let mut round = Stroke::new(40.0, p(100.0, 0.0));
         round.points[0].pressure = 0.1;
         let cel = Cel {
+            translation: [0.0; 2],
             strokes: vec![Arc::new(round)],
         };
         let mut index = EraserIndex::new(&cel);

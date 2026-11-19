@@ -43,6 +43,7 @@ struct Drawing {
     last: Point,
     smoother: Option<StrokeSmoother>,
     liquify: bool,
+    movement: bool,
     index: Option<SpatialIndex>,
     eraser: Option<EraserIndex>,
     recorded: bool,
@@ -317,7 +318,7 @@ impl Studio {
                 self.layer = self.layer.saturating_sub(1);
             }
             "Smaller" | "Larger" => {
-                if self.doc.layers[self.layer].brush == Brush::Fill {
+                if matches!(self.doc.layers[self.layer].brush, Brush::Fill | Brush::Move) {
                     return;
                 }
                 if self.drawing.as_ref().is_none_or(|d| !d.recorded) {
@@ -781,15 +782,30 @@ impl Studio {
         }
     }
     fn start_stroke(&mut self, point: Point) {
-        if self.doc.layers[self.layer].brush == Tool::Eraser {
-            let cel = self.doc.layers[self.layer].held(tick(self.time));
-            let index = EraserIndex::new(cel.map_or(&Cel::default(), |c| c));
+        if self.doc.layers[self.layer].brush == Tool::Move {
             self.drawing = Some(Drawing {
                 layer: self.layer,
                 time: tick(self.time),
                 last: point,
                 smoother: None,
                 liquify: false,
+                movement: true,
+                index: None,
+                eraser: None,
+                recorded: false,
+            });
+            return;
+        }
+        if self.doc.layers[self.layer].brush == Tool::Eraser {
+            let cel = self.doc.layers[self.layer].held(tick(self.time));
+            let index = EraserIndex::new(cel.map_or(&Cel::default(), |c| c));
+            self.drawing = Some(Drawing {
+                layer: self.layer,
+                time: tick(self.time),
+                last: cel.map_or(point, |cel| cel.local_point(point)),
+                smoother: None,
+                liquify: false,
+                movement: false,
                 index: None,
                 eraser: Some(index),
                 recorded: false,
@@ -803,14 +819,11 @@ impl Studio {
         let time = tick(self.time);
         let layer = self.layer;
         let width = self.doc.layers[layer].brush_width(self.doc.layers[self.layer].brush);
-        let movement = self.doc.layers[layer].blend == Blend::Move;
         let cel = self.doc.layers[layer].begin_edit(time, liquify);
+        let point = cel.local_point(point);
         let index = if liquify {
             Some(SpatialIndex::new(cel, width * 0.5))
         } else {
-            if movement {
-                cel.strokes.clear();
-            }
             let mut stroke = Stroke::new(width, point);
             stroke.brush = brush;
             cel.strokes.push(Arc::new(stroke));
@@ -820,15 +833,13 @@ impl Studio {
             layer,
             time,
             last: point,
-            smoother: if !liquify
-                && !movement
-                && self.preferences.interpolation == Interpolation::Smooth
-            {
+            smoother: if !liquify && self.preferences.interpolation == Interpolation::Smooth {
                 Some(StrokeSmoother::new(point))
             } else {
                 None
             },
             liquify,
+            movement: false,
             index,
             eraser: None,
             recorded: true,
@@ -838,6 +849,9 @@ impl Studio {
         let Some(mut drawing) = self.drawing.take() else {
             return;
         };
+        let point = self.doc.layers[drawing.layer]
+            .held(drawing.time)
+            .map_or(point, |cel| cel.local_point(point));
         let width = self.doc.layers[drawing.layer].brush_width(Tool::Eraser);
         let hits = drawing
             .eraser
@@ -859,14 +873,35 @@ impl Studio {
             self.erase_segment(point);
             return;
         }
+        if self.drawing.as_ref().is_some_and(|d| d.movement) {
+            let mut drawing = self.drawing.take().unwrap();
+            let delta = [point.x - drawing.last.x, point.y - drawing.last.y];
+            if delta != [0.0; 2]
+                && self.doc.layers[drawing.layer]
+                    .held(drawing.time)
+                    .is_some_and(|cel| !cel.strokes.is_empty())
+            {
+                if !drawing.recorded {
+                    self.record();
+                    drawing.recorded = true;
+                }
+                self.doc.layers[drawing.layer]
+                    .begin_edit(drawing.time, true)
+                    .translate(delta);
+            }
+            drawing.last = point;
+            self.drawing = Some(drawing);
+            return;
+        }
         let Some(drawing) = &mut self.drawing else {
             return;
         };
+        let point = self.doc.layers[drawing.layer]
+            .held(drawing.time)
+            .map_or(point, |cel| cel.local_point(point));
         let delta = [point.x - drawing.last.x, point.y - drawing.last.y];
         let distance = drawing.last.distance(point);
-        if self.doc.layers[drawing.layer].blend != Blend::Move
-            && self.doc.layers[drawing.layer].brush == Tool::Fill
-        {
+        if self.doc.layers[drawing.layer].brush == Tool::Fill {
             drawing.last = point;
             return;
         }
@@ -929,15 +964,7 @@ impl Studio {
             }
         } else {
             let stroke = Arc::make_mut(cel.strokes.last_mut().unwrap());
-            if layer.blend == Blend::Move {
-                // A movement layer stores only endpoints; cost is independent of gesture length.
-                if stroke.points.len() == 1 {
-                    stroke.points.push(point);
-                } else {
-                    stroke.points[1] = point;
-                    stroke.invalidate_from(0);
-                }
-            } else if let Some(smoother) = &mut drawing.smoother {
+            if let Some(smoother) = &mut drawing.smoother {
                 smoother.push(stroke, point, self.preferences.spacing);
             } else {
                 let steps = (distance / self.preferences.spacing).ceil().max(1.0) as usize;
@@ -1155,8 +1182,9 @@ impl Studio {
             unsafe {
                 renderer.verify_sampler_bindings(gl);
             }
-            outputs.push("All compositor samplers are complete and do not alias the output, including watermark-only and movement-only scenes".into());
+            outputs.push("All compositor samplers are complete and do not alias the output, including watermark-only scenes".into());
             outputs.push(unsafe { Renderer::verify_mask_precision(gl) });
+            outputs.push(unsafe { renderer.verify_drawing_translation(gl) });
             outputs.push(unsafe { renderer.verify_retained_rasters(gl) });
 
             let mut fill = Document::default();
@@ -1185,9 +1213,8 @@ impl Studio {
             );
             for (name, blend, style) in [
                 ("ink", Blend::Base, Style::Clean),
-                ("move", Blend::Move, Style::Clean),
                 ("blur", Blend::Blur, Style::Clean),
-                ("prism", Blend::Move, Style::Prism),
+                ("prism", Blend::Blur, Style::Prism),
                 ("ribbon", Blend::Blur, Style::Ribbon),
             ] {
                 let mut document = self.doc.clone();
@@ -1212,6 +1239,7 @@ impl Studio {
                     layer.cels.insert(
                         0,
                         Arc::new(Cel {
+                            translation: [0.0; 2],
                             strokes: vec![Arc::new(stroke)],
                         }),
                     );
@@ -1265,43 +1293,7 @@ impl Studio {
                     "Rhythm grid gap is not pixel-perfect"
                 );
             }
-            let mut effect = Layer::new("Watermark move", Blend::Move, 100.0);
-            let mut motion = Stroke::new(
-                100.0,
-                Point {
-                    x: 0.0,
-                    y: 0.0,
-                    pressure: 1.0,
-                    angle: 0.0,
-                },
-            );
-            motion.points.push(Point {
-                x: -200.0,
-                y: -100.0,
-                pressure: 1.0,
-                angle: 0.0,
-            });
-            effect.cels.insert(
-                0,
-                Arc::new(Cel {
-                    strokes: vec![Arc::new(motion)],
-                }),
-            );
-            rhythm_doc.layers.push(effect);
-            let moved =
-                unsafe { renderer.read_frame(gl, &rhythm_doc.scene(0), [1920, 804]) }.unwrap();
             let original = (33 * 1920 + 1872) * 4;
-            let translated = (133 * 1920 + 1672) * 4;
-            assert_eq!(
-                &moved[original..original + 3],
-                &[255; 3],
-                "Watermark was reapplied above movement"
-            );
-            assert!(
-                moved[translated] < 40,
-                "Movement did not affect the virtual watermark layer"
-            );
-            rhythm_doc.layers.pop();
             rhythm_doc.layers[0].inverted = true;
             let inverted =
                 unsafe { renderer.read_frame(gl, &rhythm_doc.scene(0), [1920, 804]) }.unwrap();
@@ -1333,6 +1325,7 @@ impl Studio {
             marker_doc.layers[0].cels.insert(
                 0,
                 Arc::new(Cel {
+                    translation: [0.0; 2],
                     strokes: vec![Arc::new(marker)],
                 }),
             );
@@ -1377,6 +1370,7 @@ impl Studio {
             marker_doc.layers[0].cels.insert(
                 0,
                 Arc::new(Cel {
+                    translation: [0.0; 2],
                     strokes: vec![Arc::new(marker)],
                 }),
             );
@@ -1430,6 +1424,7 @@ impl Studio {
             curve_doc.layers[0].cels.insert(
                 0,
                 Arc::new(Cel {
+                    translation: [0.0; 2],
                     strokes: vec![Arc::new(Stroke::new(12.0, first))],
                 }),
             );
@@ -1532,16 +1527,17 @@ impl Studio {
                 y: 480.0,
                 pressure: 1.0,
             });
-            local_doc.layers[3].cels.insert(
+            local_doc.layers[2].cels.insert(
                 0,
                 Arc::new(Cel {
+                    translation: [0.0; 2],
                     strokes: vec![Arc::new(blur_stroke)],
                 }),
             );
             for style in Style::ALL {
                 for inverted in [false, true] {
-                    local_doc.layers[3].style = style;
-                    local_doc.layers[3].inverted = inverted;
+                    local_doc.layers[2].style = style;
+                    local_doc.layers[2].inverted = inverted;
                     let blurred =
                         unsafe { renderer.read_frame(gl, &local_doc.scene(0), [384, 192]) }
                             .unwrap();
@@ -1565,8 +1561,8 @@ impl Studio {
                     assert!(changed_inside > 50, "Local blur had no effect");
                 }
             }
-            local_doc.layers[3].style = Style::Clean;
-            local_doc.layers[3].inverted = false;
+            local_doc.layers[2].style = Style::Clean;
+            local_doc.layers[2].inverted = false;
             let once = unsafe { renderer.read_frame(gl, &local_doc.scene(0), [384, 192]) }.unwrap();
             let mut second = Stroke::new(
                 120.0,
@@ -1583,7 +1579,7 @@ impl Studio {
                 y: 650.0,
                 pressure: 1.0,
             });
-            Arc::make_mut(local_doc.layers[3].cels.get_mut(&0).unwrap())
+            Arc::make_mut(local_doc.layers[2].cels.get_mut(&0).unwrap())
                 .strokes
                 .push(Arc::new(second));
             let twice =
@@ -1628,6 +1624,7 @@ impl Studio {
             pressure_doc.layers[0].cels.insert(
                 0,
                 Arc::new(Cel {
+                    translation: [0.0; 2],
                     strokes: vec![Arc::new(stroke)],
                 }),
             );

@@ -112,16 +112,24 @@ impl Stroke {
             })
             .unwrap_or(0)
     }
-    pub fn motion(&self) -> [f32; 2] {
-        match (self.points.first(), self.points.last()) {
-            (Some(a), Some(b)) => [b.x - a.x, b.y - a.y],
-            _ => [0.0; 2],
-        }
-    }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Cel {
+    /// Shared translation keeps moving a drawing independent of its point count.
+    #[serde(default)]
+    pub translation: [f32; 2],
     pub strokes: Vec<Arc<Stroke>>,
+}
+impl Cel {
+    pub fn local_point(&self, mut point: Point) -> Point {
+        point.x -= self.translation[0];
+        point.y -= self.translation[1];
+        point
+    }
+    pub fn translate(&mut self, delta: [f32; 2]) {
+        self.translation[0] += delta[0];
+        self.translation[1] += delta[1];
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Blend {
@@ -129,29 +137,21 @@ pub enum Blend {
     Xor,
     Darken,
     Lighten,
-    Move,
     Blur,
 }
 impl Blend {
-    pub const OVERLAYS: [Self; 5] = [
-        Self::Xor,
-        Self::Darken,
-        Self::Lighten,
-        Self::Move,
-        Self::Blur,
-    ];
+    pub const OVERLAYS: [Self; 4] = [Self::Xor, Self::Darken, Self::Lighten, Self::Blur];
     pub fn name(self) -> &'static str {
         match self {
             Self::Base => "Base",
             Self::Xor => "XOR",
             Self::Darken => "Darken",
             Self::Lighten => "Lighten",
-            Self::Move => "Move",
             Self::Blur => "Motion blur",
         }
     }
     pub fn effect(self) -> bool {
-        matches!(self, Self::Move | Self::Blur)
+        matches!(self, Self::Blur)
     }
     pub fn shader_id(self) -> i32 {
         match self {
@@ -159,7 +159,6 @@ impl Blend {
             Self::Xor => 1,
             Self::Darken => 2,
             Self::Lighten => 3,
-            Self::Move => 4,
             Self::Blur => 5,
         }
     }
@@ -198,6 +197,7 @@ pub enum Brush {
     Liquify,
     Eraser,
     Fill,
+    Move,
 }
 fn default_eraser_width() -> f32 {
     42.0
@@ -236,7 +236,11 @@ impl Layer {
             inverted: false,
             visible: true,
             width,
-            brush: Brush::Ink,
+            brush: if blend == Blend::Blur {
+                Brush::Marker
+            } else {
+                Brush::Ink
+            },
             liquify_width: default_liquify_width(),
             marker_width: default_marker_width(),
             eraser_width: default_eraser_width(),
@@ -246,7 +250,7 @@ impl Layer {
     }
     pub fn brush_width(&self, brush: Brush) -> f32 {
         match brush {
-            Brush::Ink | Brush::Fill => self.width,
+            Brush::Ink | Brush::Fill | Brush::Move => self.width,
             Brush::Marker => self.marker_width,
             Brush::Liquify => self.liquify_width,
             Brush::Eraser => self.eraser_width,
@@ -254,7 +258,7 @@ impl Layer {
     }
     pub fn brush_width_mut(&mut self, brush: Brush) -> &mut f32 {
         match brush {
-            Brush::Ink | Brush::Fill => &mut self.width,
+            Brush::Ink | Brush::Fill | Brush::Move => &mut self.width,
             Brush::Marker => &mut self.marker_width,
             Brush::Liquify => &mut self.liquify_width,
             Brush::Eraser => &mut self.eraser_width,
@@ -657,12 +661,11 @@ impl Default for Document {
             layers: vec![
                 Layer::new("Paper", Blend::Xor, 6.0),
                 {
-                    let mut layer = Layer::new("Ink", Blend::Xor, 42.0);
+                    let mut layer = Layer::new("Ink", Blend::Xor, 6.0);
                     layer.brush = Brush::Marker;
                     layer
                 },
-                Layer::new("Movement", Blend::Move, 100.0),
-                Layer::new("Atmosphere", Blend::Blur, 140.0),
+                Layer::new("Atmosphere", Blend::Blur, 6.0),
             ],
             timing: Timing::default(),
             settings: Settings::default(),
@@ -813,6 +816,9 @@ impl Document {
                 return Err("Invalid layer settings".into());
             }
             for c in l.cels.values() {
+                if c.translation.iter().any(|v| !v.is_finite()) {
+                    return Err("Invalid drawing translation".into());
+                }
                 for stroke in &c.strokes {
                     if !stroke.width.is_finite()
                         || stroke.width <= 0.0
@@ -999,6 +1005,38 @@ mod tests {
         }
     }
     #[test]
+    fn moving_a_held_drawing_shares_vectors_and_preserves_history_and_other_layers() {
+        let mut doc = Document::default();
+        let mut stroke = Stroke::new(24.0, p(80.0, 120.0));
+        stroke.points.push(p(140.0, 180.0));
+        let stroke = Arc::new(stroke);
+        doc.layers[0]
+            .begin_edit(0, false)
+            .strokes
+            .push(stroke.clone());
+        doc.layers[1]
+            .begin_edit(0, false)
+            .strokes
+            .push(stroke.clone());
+        let mut history = History::default();
+        history.record(&doc);
+        doc.layers[0].begin_edit(10, true).translate([70.0, -30.0]);
+        let moved = &doc.layers[0].cels[&10];
+        assert_eq!(moved.translation, [70.0, -30.0]);
+        assert_eq!(moved.strokes.len(), 1);
+        assert!(Arc::ptr_eq(&moved.strokes[0], &stroke));
+        assert_eq!(moved.local_point(p(150.0, 90.0)), p(80.0, 120.0));
+        assert_eq!(doc.layers[0].cels[&0].translation, [0.0; 2]);
+        assert_eq!(doc.layers[1].cels[&0].translation, [0.0; 2]);
+        let saved = serde_json::to_value(&doc).unwrap();
+        let loaded: Document = serde_json::from_value(saved).unwrap();
+        assert_eq!(loaded.layers[0].cels[&10].translation, [70.0, -30.0]);
+        assert!(history.undo(&mut doc));
+        assert!(!doc.layers[0].cels.contains_key(&10));
+        assert!(history.redo(&mut doc));
+        assert_eq!(doc.layers[0].cels[&10].translation, [70.0, -30.0]);
+    }
+    #[test]
     fn variable_tempo_grid_crosses_anchors_both_ways() {
         let t = Timing {
             tempos: vec![
@@ -1135,6 +1173,7 @@ mod rhythm_and_exposure_tests {
     use super::*;
     fn cel(x: f32) -> Arc<Cel> {
         Arc::new(Cel {
+            translation: [0.0; 2],
             strokes: vec![Arc::new(Stroke::new(
                 10.0,
                 Point {
@@ -1352,6 +1391,7 @@ mod frame_edit_tests {
     use super::*;
     fn drawing(x: f32) -> Arc<Cel> {
         Arc::new(Cel {
+            translation: [0.0; 2],
             strokes: vec![Arc::new(Stroke::new(
                 10.0,
                 Point {

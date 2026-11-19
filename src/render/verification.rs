@@ -35,7 +35,7 @@ impl Renderer {
             .begin_edit(0, false)
             .strokes
             .push(Arc::new(marker));
-        doc.layers[3]
+        doc.layers[2]
             .begin_edit(0, false)
             .strokes
             .push(Arc::new(make_stroke(70.0)));
@@ -45,7 +45,7 @@ impl Renderer {
         for blend in [Blend::Xor, Blend::Darken, Blend::Lighten, Blend::Blur] {
             doc.layers[1].blend = blend;
             for style in Style::ALL {
-                doc.layers[3].style = style;
+                doc.layers[2].style = style;
                 let actual = optimized.read_frame(gl, &doc.scene(0), [960, 402]).unwrap();
                 let expected = reference.read_frame(gl, &doc.scene(0), [960, 402]).unwrap();
                 assert_eq!(
@@ -57,6 +57,92 @@ impl Renderer {
         optimized.destroy(gl);
         reference.destroy(gl);
         "R16F ink masks are pixel-identical to RGBA16F across blend modes, marker tilt, pressure, local blur and all blur styles".into()
+    }
+    pub unsafe fn verify_drawing_translation(&mut self, gl: &glow::Context) -> String {
+        use crate::model::*;
+        let mut doc = Document::default();
+        doc.layers.truncate(1);
+        doc.settings.aspect = 2.0;
+        doc.settings.watermark = false;
+        let mut stroke = Stroke::new(
+            80.0,
+            Point {
+                x: 300.0,
+                y: 300.0,
+                pressure: 0.8,
+                angle: 0.0,
+            },
+        );
+        stroke.points.push(Point {
+            x: 700.0,
+            y: 300.0,
+            pressure: 0.8,
+            angle: 0.0,
+        });
+        stroke.brush = Brush::Marker;
+        doc.layers[0]
+            .begin_edit(0, false)
+            .strokes
+            .push(Arc::new(stroke));
+        let before = self.read_frame(gl, &doc.scene(0), [960, 480]).unwrap();
+        doc.layers[0].begin_edit(0, true).translate([160.0, 80.0]);
+        let moved = self.read_frame(gl, &doc.scene(0), [960, 480]).unwrap();
+        let mut mismatch = 0;
+        let mut max_delta = 0;
+        let mut first = Vec::new();
+        for y in 0..480_usize {
+            for x in 0..960_usize {
+                let expected = if x >= 80 && y + 40 < 480 {
+                    &before[((y + 40) * 960 + x - 80) * 4..][..3]
+                } else {
+                    &[255; 3]
+                };
+                let actual = &moved[(y * 960 + x) * 4..][..3];
+                mismatch += usize::from(actual != expected);
+                max_delta = max_delta.max(actual[0].abs_diff(expected[0]));
+                if actual != expected && first.len() < 8 {
+                    first.push((x, y, actual[0], expected[0]));
+                }
+            }
+        }
+        assert_eq!(
+            mismatch, 0,
+            "Translation differences: max={max_delta}, samples={first:?}"
+        );
+        let fresh = {
+            let mut renderer = Self::new(gl).unwrap();
+            let result = renderer.read_frame(gl, &doc.scene(0), [960, 480]).unwrap();
+            renderer.destroy(gl);
+            result
+        };
+        assert_eq!(moved, fresh, "Moved raster did not survive fresh rendering");
+        // Subsequent ink uses local coordinates, including when its bounds fall
+        // outside the original page. The displayed point must stay under the pen.
+        let cel = doc.layers[0].begin_edit(0, true);
+        let point = cel.local_point(Point {
+            x: 100.0,
+            y: 100.0,
+            pressure: 1.0,
+            angle: 0.0,
+        });
+        cel.strokes.push(Arc::new(Stroke::new(20.0, point)));
+        let edited = self.read_frame(gl, &doc.scene(0), [960, 480]).unwrap();
+        assert!(
+            edited[((480 - 50) * 960 + 50) * 4] < 10,
+            "Ink after translation used the wrong coordinates"
+        );
+        let cel = doc.layers[0].begin_edit(0, true);
+        cel.strokes.clear();
+        let mut fill = Stroke::new(20.0, point);
+        fill.brush = Brush::Fill;
+        cel.strokes.push(Arc::new(fill));
+        cel.translation = [4000.0, -3000.0];
+        let pixels = self.read_frame(gl, &doc.scene(0), [960, 480]).unwrap();
+        assert!(
+            pixels.as_chunks::<4>().0.iter().all(|p| p[..3] == [0; 3]),
+            "Moving an infinite fill clipped it"
+        );
+        "Move brush: translation matches shifted pixels and fresh renders; subsequent ink aligns and infinite Fill stays black".into()
     }
     pub unsafe fn verify_sampler_bindings(&mut self, gl: &glow::Context) {
         use crate::model::*;
@@ -89,24 +175,6 @@ impl Renderer {
         let mut doc = Document::default();
         doc.layers.clear();
         verify(self, &doc.scene(0)); // A white page with only the rhythm watermark.
-        doc.settings.watermark = false;
-        let mut layer = Layer::new("Move", Blend::Move, 42.0);
-        let mut stroke = Stroke::new(
-            42.0,
-            Point {
-                x: 100.0,
-                y: 100.0,
-                pressure: 1.0,
-                angle: 0.0,
-            },
-        );
-        stroke.points.push(Point {
-            x: 120.0,
-            ..stroke.points[0]
-        });
-        layer.begin_edit(0, false).strokes.push(Arc::new(stroke));
-        doc.layers.push(layer);
-        verify(self, &doc.scene(0));
         gl.bind_framebuffer(glow::FRAMEBUFFER, framebuffer);
         gl.active_texture(glow::TEXTURE0);
     }

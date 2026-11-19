@@ -22,7 +22,7 @@ def click(x,y,button=1):
     time.sleep(.25)
 
 def brush(name):
-    directions={'round':(720,425),'marker':(772,463),'fill':(752,525),'eraser':(688,525),'liquify':(668,463)}
+    directions={'round':(720,425),'marker':(768,452),'fill':(768,508),'eraser':(720,535),'liquify':(672,508),'move':(672,452)}
     subprocess.run(['xdotool','mousemove','720','480','mousedown','3'],check=True)
     time.sleep(.1)
     x,y=directions[name]
@@ -72,9 +72,9 @@ with tempfile.TemporaryDirectory(prefix='mori-ui-') as temporary:
         subprocess.run(['xdotool','mousemove','600','733'],check=True);time.sleep(.2)
         hovered=shot('track-hover')
         assert ImageChops.difference(clear.crop((450,710,850,755)),hovered.crop((450,710,850,755))).getbbox(),'Track has no hover feedback'
-        subprocess.run(['xdotool','mousemove','327','791'],check=True);time.sleep(.2)
+        subprocess.run(['xdotool','mousemove','327','733'],check=True);time.sleep(.2)
         head=shot('frame-head-hover')
-        assert sum(min(p[:3])>180 for p in head.crop((322,786,332,797)).getdata())>sum(min(p[:3])>180 for p in clear.crop((322,786,332,797)).getdata())+4,'Frame head did not highlight'
+        assert sum(min(p[:3])>180 for p in head.crop((322,728,332,739)).getdata())>sum(min(p[:3])>180 for p in clear.crop((322,728,332,739)).getdata())+4,'Frame head did not highlight'
         # Every lane scrubs during the gesture, before release.
         for y in [453,510,560,615,675,733,791,880]:
             subprocess.run(['xdotool','mousemove','600',str(y),'mousedown','1'],check=True);time.sleep(.1)
@@ -84,12 +84,12 @@ with tempfile.TemporaryDirectory(prefix='mori-ui-') as temporary:
             subprocess.run(['xdotool','mouseup','1'],check=True);time.sleep(.1)
         # Only the handle starts frame movement; body dragging above only scrubs.
         before=shot('before-frame-drag')
-        subprocess.run(['xdotool','mousemove','327','791','mousedown','1'],check=True);time.sleep(.1)
-        subprocess.run(['xdotool','mousemove','500','791'],check=True);time.sleep(.2)
+        subprocess.run(['xdotool','mousemove','327','733','mousedown','1'],check=True);time.sleep(.1)
+        subprocess.run(['xdotool','mousemove','500','733'],check=True);time.sleep(.2)
         shot('frame-drag-preview')
         subprocess.run(['xdotool','mouseup','1'],check=True);time.sleep(.2)
         moved=shot('frame-moved')
-        assert ImageChops.difference(before.crop((300,775,520,808)),moved.crop((300,775,520,808))).getbbox(),'Frame handle did not move the frame'
+        assert ImageChops.difference(before.crop((300,717,520,750)),moved.crop((300,717,520,750))).getbbox(),'Frame handle did not move the frame'
         click(90,615,3);menu=shot('layer-menu');dark_surface(menu,(95,570,320,780));key('Escape')
         click(260,559,3);shot('tempo-menu');edit(478,622,4);shot('tempo-division-edited');key('Escape')
         key('ctrl+comma')
@@ -122,11 +122,11 @@ with tempfile.TemporaryDirectory(prefix='mori-ui-') as temporary:
         def selected_brush():
             subprocess.run(['xdotool','mousemove','720','480','mousedown','3'],check=True);time.sleep(.2)
             picture=shot('brush-memory')
-            names=['round','marker','fill','eraser','liquify']
+            names=['round','marker','fill','eraser','liquify','move']
             import math
-            colors=[picture.getpixel((round(720+math.cos(-math.pi/2+i*math.tau/5)*70),round(480+math.sin(-math.pi/2+i*math.tau/5)*70))) for i in range(5)]
+            colors=[picture.getpixel((round(720+math.cos(-math.pi/2+i*math.tau/6)*70),round(480+math.sin(-math.pi/2+i*math.tau/6)*70))) for i in range(6)]
             subprocess.run(['xdotool','mouseup','3'],check=True);time.sleep(.1)
-            return names[max(range(5),key=lambda i:colors[i][2])]
+            return names[max(range(6),key=lambda i:colors[i][2])]
         assert selected_brush()=='round'
         key('w');assert selected_brush()=='marker','Second layer is not Marker'
         brush('liquify');key('s');assert selected_brush()=='round','Brush leaked to the previous layer'
@@ -138,14 +138,8 @@ with tempfile.TemporaryDirectory(prefix='mori-ui-') as temporary:
         brush('eraser');click(500,400)
         assert min(shot('empty-frame-retained').getpixel((1000,600))[:3])>240,'Erasing removed the empty frame'
         key('ctrl+z');assert min(shot('empty-frame-undo').getpixel((1000,600))[:3])>240
-        # Move layers always use the move cursor, for every tool.
-        key('w');key('w')
-        for tool in ['round','marker','liquify','eraser','fill']:
-            brush(tool)
-            subprocess.run(['xdotool','mousemove','720','480'],check=True);time.sleep(.2)
-            cursor=shot('move-cursor-'+tool).crop((700,460,740,500))
-            if tool=='round':reference=cursor
-            else:assert ImageChops.difference(reference,cursor).getbbox() is None,'Move cursor changed with brush'
+        key('w');key('w');assert selected_brush()=='marker','Motion blur layer is not Marker'
+        brush('move');assert selected_brush()=='move'
         assert process.poll() is None
     finally:
         process.terminate();process.wait(timeout=10)

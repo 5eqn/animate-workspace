@@ -38,6 +38,8 @@ Upstream provenance, licenses and exact integration points are documented in
 - Ordinary black/white ink masks use R16F, including their four-sample render
   buffer. This retains the same coverage precision as RGBA16F with one quarter
   the channels. Colored composition and blur direction/coverage stay RGBA16F.
+- The Move brush updates a shared translation for the drawing. Stroke geometry
+  and pressure remain unchanged; rendering applies the translation on the GPU.
 - Multisample buffers are allocated only when their drawing path is used.
 - Completed scene textures are retained directly, avoiding a full-canvas copy
   after every edited frame.
@@ -77,7 +79,7 @@ selects a real NVIDIA EGL device by default (`--vendor` selects another driver),
 and writes JSON with CPU and GPU p95/max times. Each workload has 15 warmup frames
 and 60 recorded frames. GPU times use driver timer queries; waiting for their
 results happens only in this offline script. Workloads cover blank and retained
-views, 1200-unit round/marker brushes, liquify, dense liquify, movement, directional
+views, 1200-unit round/marker brushes, liquify, dense liquify, the Move brush, directional
 and chromatic blur, and six distinct onion drawings.
 
 For native interaction testing, use `./scripts/run.sh --debug-fps --trace-frames`.

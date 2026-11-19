@@ -674,136 +674,119 @@ impl Renderer {
             if layer.blend.effect() && layer.cel.strokes.is_empty() {
                 continue;
             }
-            if layer.blend != crate::model::Blend::Move {
-                let blur = layer.blend == crate::model::Blend::Blur;
-                // Ordinary ink is monochrome. R16F retains the same coverage
-                // precision as RGBA16F while transferring one quarter the data.
-                let format = if blur {
-                    glow::RGBA16F
-                } else {
-                    self.mask_format
-                };
-                let old = self.layer_rasters.remove(&layer_index);
-                let mut raster = match old {
-                    Some(raster) if raster.format == format => raster,
-                    old => {
-                        if let Some(raster) = old {
-                            Self::delete_raster(gl, raster.target);
-                        }
-                        LayerRaster {
-                            target: self.new_raster_format(gl, format)?,
-                            state: RasterState::new(blur),
-                            format,
-                        }
+            let blur = layer.blend == crate::model::Blend::Blur;
+            // Ordinary ink is monochrome. R16F retains the same coverage
+            // precision as RGBA16F while transferring one quarter the data.
+            let format = if blur {
+                glow::RGBA16F
+            } else {
+                self.mask_format
+            };
+            let old = self.layer_rasters.remove(&layer_index);
+            let mut raster = match old {
+                Some(raster) if raster.format == format => raster,
+                old => {
+                    if let Some(raster) = old {
+                        Self::delete_raster(gl, raster.target);
                     }
-                };
-                let dirty = raster.state.update(&layer.cel, blur, scene.aspect);
-                if let Some(dirty) = dirty {
-                    if let Some([x, y, w, h]) = dirty.pixels(size, scene.aspect) {
-                        let msaa = self.multisample(gl, blur)?;
-                        self.work.raster_pixels += (w as u64) * (h as u64);
-                        let redraw = Bounds::pixel_region([x, y, w, h], size, scene.aspect);
-                        gl.enable(glow::SCISSOR_TEST);
-                        gl.scissor(x, y, w, h);
-                        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(msaa));
-                        if blur {
-                            gl.clear_color(0.0, 0.0, 0.0, 0.0);
-                        } else {
-                            gl.clear_color(1.0, 1.0, 1.0, 1.0);
-                        }
-                        gl.clear(glow::COLOR_BUFFER_BIT);
-                        gl.use_program(Some(self.ink));
-                        Self::uniform_i(gl, self.ink, "flow_mode", blur as i32);
-                        gl.uniform_2_f32(
-                            gl.get_uniform_location(self.ink, "canvas").as_ref(),
-                            1920.0,
-                            1920.0 / scene.aspect,
-                        );
-                        // Rebuild only damaged pixels, including older marks underneath
-                        // an erased or reshaped tip. Unchanged pixels stay on the GPU.
-                        for (i, stroke) in layer.cel.strokes.iter().enumerate() {
-                            if !raster.state.strokes[i].bounds.intersects(redraw) {
-                                continue;
-                            }
-                            if stroke.brush == Brush::Fill {
-                                let flow = direction(stroke, stroke.points.len() - 1);
-                                gl.clear_color(
-                                    if blur { flow[0] } else { 0.0 },
-                                    if blur { flow[1] } else { 0.0 },
-                                    0.0,
-                                    1.0,
-                                );
-                                gl.clear(glow::COLOR_BUFFER_BIT);
-                            } else {
-                                self.mesh(gl, stroke);
-                            }
-                        }
-                        gl.disable_vertex_attrib_array(0);
-                        gl.disable_vertex_attrib_array(1);
-                        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(msaa));
-                        gl.bind_framebuffer(
-                            glow::DRAW_FRAMEBUFFER,
-                            Some(raster.target.framebuffer),
-                        );
-                        gl.blit_framebuffer(
-                            x,
-                            y,
-                            x + w,
-                            y + h,
-                            x,
-                            y,
-                            x + w,
-                            y + h,
-                            glow::COLOR_BUFFER_BIT,
-                            glow::NEAREST,
-                        );
-                        gl.disable(glow::SCISSOR_TEST);
+                    LayerRaster {
+                        target: self.new_raster_format(gl, format)?,
+                        state: RasterState::new(blur),
+                        format,
                     }
                 }
-                self.layer_rasters.insert(layer_index, raster);
-            }
-            let motions = if layer.blend == crate::model::Blend::Move {
-                layer
-                    .cel
-                    .strokes
-                    .iter()
-                    .map(|s| s.motion())
-                    .collect::<Vec<_>>()
-            } else {
-                vec![[0.0; 2]]
             };
-            for (pass, motion) in motions.iter().enumerate() {
-                let next = 1 - front;
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.targets[next].framebuffer));
-                gl.use_program(Some(self.composite));
-                let ink = if layer.blend == crate::model::Blend::Move {
-                    self.targets[front].texture
-                } else {
-                    self.layer_rasters[&layer_index].target.texture
-                };
-                self.bind_composite_inputs(gl, self.targets[front].texture, ink);
-                Self::uniform_i(gl, self.composite, "mode", layer.blend.shader_id());
-                Self::uniform_i(gl, self.composite, "style", layer.style.id());
-                Self::uniform_i(
-                    gl,
-                    self.composite,
-                    "inverted",
-                    (layer.inverted && pass + 1 == motions.len()) as i32,
-                );
-                Self::uniform_f(gl, self.composite, "strength", layer.strength);
-                gl.uniform_2_f32(
-                    gl.get_uniform_location(self.composite, "canvas").as_ref(),
-                    1920.0,
-                    1920.0 / scene.aspect,
-                );
-                gl.uniform_2_f32(
-                    gl.get_uniform_location(self.composite, "motion").as_ref(),
-                    motion[0] / 1920.0,
-                    -motion[1] / (1920.0 / scene.aspect),
-                );
-                gl.draw_arrays(glow::TRIANGLES, 0, 3);
-                front = next;
+            let dirty = raster.state.update(&layer.cel, blur, scene.aspect);
+            if let Some(dirty) = dirty {
+                if let Some([x, y, w, h]) = dirty.pixels(size, scene.aspect) {
+                    let msaa = self.multisample(gl, blur)?;
+                    self.work.raster_pixels += (w as u64) * (h as u64);
+                    let mut redraw = Bounds::pixel_region([x, y, w, h], size, scene.aspect);
+                    for i in 0..2 {
+                        redraw.min[i] -= layer.cel.translation[i];
+                        redraw.max[i] -= layer.cel.translation[i];
+                    }
+                    gl.enable(glow::SCISSOR_TEST);
+                    gl.scissor(x, y, w, h);
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(msaa));
+                    if blur {
+                        gl.clear_color(0.0, 0.0, 0.0, 0.0);
+                    } else {
+                        gl.clear_color(1.0, 1.0, 1.0, 1.0);
+                    }
+                    gl.clear(glow::COLOR_BUFFER_BIT);
+                    gl.use_program(Some(self.ink));
+                    Self::uniform_i(gl, self.ink, "flow_mode", blur as i32);
+                    gl.uniform_2_f32(
+                        gl.get_uniform_location(self.ink, "canvas").as_ref(),
+                        1920.0,
+                        1920.0 / scene.aspect,
+                    );
+                    gl.uniform_2_f32(
+                        gl.get_uniform_location(self.ink, "translation").as_ref(),
+                        layer.cel.translation[0],
+                        layer.cel.translation[1],
+                    );
+                    // Rebuild only damaged pixels, including older marks underneath
+                    // an erased or reshaped tip. Unchanged pixels stay on the GPU.
+                    for (i, stroke) in layer.cel.strokes.iter().enumerate() {
+                        if stroke.brush != Brush::Fill
+                            && !raster.state.strokes[i].bounds.intersects(redraw)
+                        {
+                            continue;
+                        }
+                        if stroke.brush == Brush::Fill {
+                            let flow = direction(stroke, stroke.points.len() - 1);
+                            gl.clear_color(
+                                if blur { flow[0] } else { 0.0 },
+                                if blur { flow[1] } else { 0.0 },
+                                0.0,
+                                1.0,
+                            );
+                            gl.clear(glow::COLOR_BUFFER_BIT);
+                        } else {
+                            self.mesh(gl, stroke);
+                        }
+                    }
+                    gl.disable_vertex_attrib_array(0);
+                    gl.disable_vertex_attrib_array(1);
+                    gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(msaa));
+                    gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(raster.target.framebuffer));
+                    gl.blit_framebuffer(
+                        x,
+                        y,
+                        x + w,
+                        y + h,
+                        x,
+                        y,
+                        x + w,
+                        y + h,
+                        glow::COLOR_BUFFER_BIT,
+                        glow::NEAREST,
+                    );
+                    gl.disable(glow::SCISSOR_TEST);
+                }
             }
+            self.layer_rasters.insert(layer_index, raster);
+            let next = 1 - front;
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.targets[next].framebuffer));
+            gl.use_program(Some(self.composite));
+            self.bind_composite_inputs(
+                gl,
+                self.targets[front].texture,
+                self.layer_rasters[&layer_index].target.texture,
+            );
+            Self::uniform_i(gl, self.composite, "mode", layer.blend.shader_id());
+            Self::uniform_i(gl, self.composite, "style", layer.style.id());
+            Self::uniform_i(gl, self.composite, "inverted", layer.inverted as i32);
+            Self::uniform_f(gl, self.composite, "strength", layer.strength);
+            gl.uniform_2_f32(
+                gl.get_uniform_location(self.composite, "canvas").as_ref(),
+                1920.0,
+                1920.0 / scene.aspect,
+            );
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            front = next;
         }
         Ok(front)
     }
@@ -1016,9 +999,10 @@ impl Renderer {
                 pressure: 1.0,
             },
         ]);
-        document.layers[3].cels.insert(
+        document.layers[2].cels.insert(
             0,
             Arc::new(Cel {
+                translation: [0.0; 2],
                 strokes: vec![Arc::new(stroke)],
             }),
         );
@@ -1026,7 +1010,7 @@ impl Renderer {
         let framebuffer = gl.get_parameter_framebuffer(glow::FRAMEBUFFER_BINDING);
         gl.bind_framebuffer(
             glow::FRAMEBUFFER,
-            Some(self.layer_rasters[&3].target.framebuffer),
+            Some(self.layer_rasters[&2].target.framebuffer),
         );
         let sample = |x: i32, y: i32| {
             let mut bytes = [0_u8; 16];

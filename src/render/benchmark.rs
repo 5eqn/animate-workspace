@@ -43,7 +43,7 @@ pub unsafe fn run(gl: &glow::Context, size: [i32; 2]) -> serde_json::Value {
         "large_marker",
         "liquify",
         "liquify_dense",
-        "move_prism",
+        "move_brush",
         "blur",
         "blur_chromatic",
         "onion_six",
@@ -69,20 +69,11 @@ pub unsafe fn run(gl: &glow::Context, size: [i32; 2]) -> serde_json::Value {
             if name == "large_marker" {
                 stroke.brush = Brush::Marker;
             }
-            let layer = if name.starts_with("blur") { 3 } else { 1 };
+            let layer = if name.starts_with("blur") { 2 } else { 1 };
             if name == "blur_chromatic" {
                 doc.layers[layer].style = Style::Prism;
             }
             doc.layers[layer]
-                .begin_edit(0, false)
-                .strokes
-                .push(Arc::new(stroke));
-        }
-        if name == "move_prism" {
-            doc.layers[2].style = Style::Prism;
-            let mut stroke = Stroke::new(240.0, point(200.0, 200.0));
-            stroke.points.push(point(400.0, 300.0));
-            doc.layers[2]
                 .begin_edit(0, false)
                 .strokes
                 .push(Arc::new(stroke));
@@ -118,7 +109,7 @@ pub unsafe fn run(gl: &glow::Context, size: [i32; 2]) -> serde_json::Value {
                 name,
                 "large_round" | "large_marker" | "blur" | "blur_chromatic"
             ) {
-                let layer = if name.starts_with("blur") { 3 } else { 1 };
+                let layer = if name.starts_with("blur") { 2 } else { 1 };
                 let cel = Arc::make_mut(doc.layers[layer].cels.get_mut(&0).unwrap());
                 let stroke = Arc::make_mut(cel.strokes.last_mut().unwrap());
                 for j in 0..4 {
@@ -136,12 +127,8 @@ pub unsafe fn run(gl: &glow::Context, size: [i32; 2]) -> serde_json::Value {
                     320.0,
                     0.6,
                 );
-            } else if name == "move_prism" {
-                let stroke = Arc::make_mut(
-                    &mut Arc::make_mut(doc.layers[2].cels.get_mut(&0).unwrap()).strokes[0],
-                );
-                stroke.points[1].x += 5.0;
-                stroke.invalidate_from(1);
+            } else if name == "move_brush" {
+                doc.layers[0].begin_edit(0, true).translate([5.0, 1.0]);
             }
             let view = View {
                 scene: doc.scene(0),

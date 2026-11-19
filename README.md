@@ -10,11 +10,12 @@ English · [简体中文](README.zh-CN.md)
 
 ## Brushes
 
-Hold the right mouse button to open the brush wheel. Move toward an icon and release to choose it; release in the center to keep your current brush. The five tools have equal space on the wheel:
+Hold the right mouse button to open the brush wheel. Move toward an icon and release to choose it; release in the center to keep your current brush. The six tools have equal space on the wheel:
 
 - **Round** draws a hard round line. Pressure changes its size.
 - **Marker** draws with a flat rectangular tip. Pen tilt turns the tip; pressure changes its size.
 - **Liquify** pushes existing lines around without changing their thickness.
+- **Move** drags all strokes in the current layer together. At a new time it starts from the preceding drawing, leaving that drawing unchanged.
 - **Eraser** removes an entire stroke when you touch it, including when you move quickly.
 - **Fill** paints the whole layer black. It is represented as a single stroke, so the eraser can remove it in one touch.
 
@@ -22,7 +23,7 @@ You can tap to make a dot, or press harder without moving to grow it. A mouse wo
 
 ![Brush settings](docs/screenshots/brushes.png)
 
-Brush settings let you adjust pressure, smoothness and default sizes. **Sample spacing** is the distance between points used to build a line: smaller values use more points. The default smooth setting rounds out quick gestures. Liquify starts with a larger brush. Onion skin shows three earlier and three later drawings, with distant drawings fading away.
+Brush settings let you adjust pressure, smoothness and shared default sizes: Round 6 px, Marker 42 px, Liquify 240 px and Eraser 42 px. Every new layer uses these sizes; existing layers keep their remembered sizes. **Sample spacing** is the distance between points used to build a line: smaller values use more points. The default smooth setting rounds out quick gestures. Liquify starts with a larger brush. Onion skin shows three earlier and three later drawings, with distant drawings fading away.
 
 ## Time
 
@@ -38,20 +39,19 @@ Scroll to pan. Pinch, or hold Command / Ctrl while scrolling, to zoom around the
 
 Double-click the tempo lane to add a BPM point. Right-click a point to set its BPM, **Division**, bars per group and beats per bar. Division is the number of steps in one beat: the default **8** gives eight positions per beat. Each point has its own setting; new points inherit the previous point's values. Changing the beat grid moves drawings to the nearest step. If two frames would overlap on one layer, later frames move forward to the next free steps.
 
-A layer keeps showing its last drawing until you change it. At a new time, Round, Marker or Fill starts a new drawing. Liquify and Eraser start from the previous drawing. Erasing every stroke leaves an empty frame. In P1, Del creates an empty frame at the current time; Shift+D copies the previous frame here as an independent drawing. Undo and redo let you revisit your edits without a fixed step limit.
+A layer keeps showing its last drawing until you change it. At a new time, Round, Marker or Fill starts a new drawing. Liquify, Move and Eraser start from the previous drawing. Erasing every stroke leaves an empty frame. In P1, Del creates an empty frame at the current time; Shift+D copies the previous frame here as an independent drawing. Undo and redo let you revisit your edits without a fixed step limit.
 
 ## Layers
 
-New projects have a widescreen 2.39:1 page and four layers. Click a layer name to select it, drag its name to reorder it, or right-click for its name, blending mode and available visual styles. There is always at least one drawing layer.
+New projects have a widescreen 2.39:1 page and three layers: two XOR drawing layers and one Motion blur layer. The second drawing layer and the blur layer start with Marker. Click a layer name to select it, drag its name to reorder it, or right-click for its name, blending mode and available visual styles. There is always at least one drawing layer.
 
 | Mode | What it does |
 | --- | --- |
 | XOR | Black on white; overlapping black marks turn white. This is the default for drawing layers. |
 | Darken / Lighten | Keeps the darker or lighter parts of the combined pictures. |
-| Move | One stroke moves everything below it by the distance from its start to its end. A new stroke replaces the previous one. Its cursor is a move symbol for every brush. |
 | Motion blur | Blurs the picture below only where you paint, along the direction of your strokes. |
 
-Move and Motion blur include Essential, Staccato echoes, Chromatic prism and Neon ribbons styles, with color in the latter two. Rendering uses the page rectangle; Move and Motion blur sample the rendered picture within that rectangle.
+Motion blur includes Essential, Staccato echoes, Chromatic prism and Neon ribbons styles, with color in the latter two. Rendering uses the page rectangle; Motion blur samples the rendered picture within that rectangle.
 
 The small rhythm blocks at the bottom right show the current beat. The default is two rows of four blocks: one turns black each beat and the group resets after two bars. A BPM point's bars and beats determine the arrangement. The blocks sit beneath your layers, so your drawing and effects also affect them. Turn them off for this project, or change their default for new projects, in **Project** settings.
 
@@ -68,6 +68,8 @@ Rendering follows the current display by default. During interaction or playback
 Application preferences save automatically: language, rendering frame rate, shortcuts, brushes, onion skin, playback options, new-project defaults and video quality. Each project keeps its own drawings, selected brushes, layer sizes and order, beat grid, music, page shape and rhythm blocks. Opening a project or undoing a drawing keeps your application preferences.
 
 **Picture offset** adjusts local music playback alignment. It defaults to **−64 ms**; negative values advance the picture and positive values delay it. It leaves the timing of exported video unchanged.
+
+Older projects open with their former Move effect layers removed. The Move brush edits only the selected layer.
 
 The macOS **File** menu offers New project, Save, Save as and Export video. Projects use `.mori` files and include the original music. Export defaults to 1920 pixels wide, 60 FPS, H.264 MP4 and AAC audio. Drawings hold until their next change, with no blending between frames. Onion skin, the cursor and mirror assistance stay out of the video. FFmpeg is required for video export.
 

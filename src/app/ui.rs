@@ -246,7 +246,7 @@ fn menu_row(ui: &mut egui::Ui, name: &str, control: impl FnOnce(&mut egui::Ui)) 
         control,
     );
 }
-fn wheel_directions() -> [(Brush, f32); 5] {
+fn wheel_directions() -> [(Brush, f32); 6] {
     std::array::from_fn(|i| {
         (
             [
@@ -255,8 +255,9 @@ fn wheel_directions() -> [(Brush, f32); 5] {
                 Brush::Fill,
                 Brush::Eraser,
                 Brush::Liquify,
+                Brush::Move,
             ][i],
-            -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::TAU / 5.0,
+            -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::TAU / 6.0,
         )
     })
 }
@@ -272,6 +273,24 @@ fn wheel_choice(center: Pos2, pos: Pos2) -> Option<Brush> {
 }
 fn brush_icon(p: &egui::Painter, c: Pos2, brush: Brush, color: Color32) {
     match brush {
+        Brush::Move => {
+            for axis in [Vec2::X, Vec2::Y] {
+                let side = Vec2::new(-axis.y, axis.x);
+                p.line_segment(
+                    [c - axis * 9.0, c + axis * 9.0],
+                    UiStroke::new(1.4_f32, color),
+                );
+                for sign in [-1.0, 1.0] {
+                    let tip = c + axis * (9.0 * sign);
+                    for edge in [-1.0, 1.0] {
+                        p.line_segment(
+                            [tip - axis * (3.0 * sign) + side * (3.0 * edge), tip],
+                            UiStroke::new(1.4_f32, color),
+                        );
+                    }
+                }
+            }
+        }
         Brush::Ink => {
             p.circle_filled(c, 9.0, color);
         }
@@ -484,7 +503,7 @@ impl Studio {
         }
     }
     fn cursor(&self, p: &egui::Painter, pos: Pos2, r: f32) {
-        if self.doc.layers[self.layer].blend == Blend::Move {
+        if self.doc.layers[self.layer].brush == Brush::Move {
             for axis in [Vec2::X, Vec2::Y] {
                 let side = Vec2::new(-axis.y, axis.x);
                 p.line_segment(
@@ -1311,15 +1330,6 @@ impl Studio {
                                             .changed()
                                         {
                                             changed = true;
-                                            if blend == Blend::Move {
-                                                for cel in layer.cels.values_mut() {
-                                                    let cel = Arc::make_mut(cel);
-                                                    if cel.strokes.len() > 1 {
-                                                        let last = cel.strokes.pop().unwrap();
-                                                        cel.strokes = vec![last];
-                                                    }
-                                                }
-                                            }
                                         }
                                     }
                                 });
@@ -1621,46 +1631,16 @@ impl Studio {
                             row(ui, "Liquify strength", |ui| {
                                 number(ui, &mut self.preferences.liquify_strength, "", 0.05..=1.0);
                             });
-                            group(ui, "New layer sizes");
-                            row(ui, "", |ui| {
-                                ui.add_sized([72.0,24.0],egui::Label::new(RichText::new(tr_ui(ui,"Eraser")).color(MUTED).size(11.0)));
-                                ui.add_sized([72.0,24.0],egui::Label::new(RichText::new(tr_ui(ui,"Liquify")).color(MUTED).size(11.0)));
-                                ui.add_sized([72.0,24.0],egui::Label::new(RichText::new(tr_ui(ui,"Marker")).color(MUTED).size(11.0)));
-                                ui.add_sized([72.0,24.0],egui::Label::new(RichText::new(tr_ui(ui,"Round")).color(MUTED).size(11.0)));
-                            });
-                            for blend in [
-                                Blend::Base,
-                                Blend::Xor,
-                                Blend::Darken,
-                                Blend::Lighten,
-                                Blend::Move,
-                                Blend::Blur,
+                            group(ui, "Default brush sizes");
+                            for (name,width) in [
+                                ("Round",&mut self.preferences.brush_defaults.ink),
+                                ("Marker",&mut self.preferences.brush_defaults.marker),
+                                ("Liquify",&mut self.preferences.brush_defaults.liquify),
+                                ("Eraser",&mut self.preferences.brush_defaults.eraser),
                             ] {
-                                row(ui, if blend==Blend::Base{"First layer"}else{blend.name()}, |ui| {
-                                    let defaults = &mut self.preferences.brush_defaults
-                                        [blend.shader_id() as usize];
-                                    ui.add_sized(
-                                        [72.0, 30.0],
-                                        egui::DragValue::new(&mut defaults.eraser)
-                                            .range(1.0..=1920.0).speed(1.0).suffix(" px"),
-                                    );
-                                    ui.add_sized(
-                                        [72.0, 30.0],
-                                        egui::DragValue::new(&mut defaults.liquify)
-                                            .range(1.0..=1920.0)
-                                            .speed(1.0)
-                                            .suffix(" px"),
-                                    );
-                                    ui.add_sized([72.0,30.0],egui::DragValue::new(&mut defaults.marker).range(1.0..=1920.0).speed(1.0).suffix(" px"));
-                                    ui.add_sized(
-                                        [72.0, 30.0],
-                                        egui::DragValue::new(&mut defaults.ink)
-                                            .range(1.0..=1920.0)
-                                            .speed(1.0)
-                                            .suffix(" px"),
-                                    );
-                                });
+                                row(ui,name,|ui|{ ui.add(egui::DragValue::new(width).range(1.0..=1920.0).speed(1.0).suffix(" px")); });
                             }
+
                         }
                         2 => {
                             let onion = &mut self.preferences.onion;
@@ -1913,16 +1893,16 @@ mod tests {
         assert_eq!(followed_start(4.0, 2.0, 1.0), 1.0);
     }
     #[test]
-    fn brush_wheel_has_five_equal_sectors() {
+    fn brush_wheel_has_six_equal_sectors() {
         let directions = wheel_directions();
         for (i, &(brush, angle)) in directions.iter().enumerate() {
             assert_eq!(
                 wheel_choice(Pos2::ZERO, Pos2::ZERO + Vec2::angled(angle) * 55.0),
                 Some(brush)
             );
-            let next = directions[(i + 1) % 5].1;
+            let next = directions[(i + 1) % 6].1;
             assert!(
-                ((next - angle).rem_euclid(std::f32::consts::TAU) - std::f32::consts::TAU / 5.0)
+                ((next - angle).rem_euclid(std::f32::consts::TAU) - std::f32::consts::TAU / 6.0)
                     .abs()
                     < 1e-6
             );

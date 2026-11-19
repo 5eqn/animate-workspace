@@ -25,7 +25,7 @@ def launch(env,demo=False):
     xd('windowfocus',window);return app
 
 def head_present(im):
-    return sum(min(im.getpixel((x,y)))>150 for x in range(250,256) for y in range(788,794))>3
+    return sum(min(im.getpixel((x,y)))>150 for x in range(250,256) for y in range(730,736))>3
 
 def ink(im):return sum(max(p)<100 for p in im.crop((475,380,525,420)).getdata())
 with tempfile.TemporaryDirectory(prefix='mori-frame-') as temp:
@@ -37,7 +37,7 @@ with tempfile.TemporaryDirectory(prefix='mori-frame-') as temp:
         key('ctrl+z');assert ink(shot('frame-blank-undo'))==ink(original)
         key('ctrl+shift+z');assert ink(shot('frame-blank-redo'))==0
         key('shift+d');assert ink(shot('frame-copy-previous'))==ink(original)
-        xd('mousemove',720,480,'mousedown',3);time.sleep(.1);xd('mousemove',688,525);time.sleep(.1);xd('mouseup',3)
+        xd('mousemove',720,480,'mousedown',3);time.sleep(.1);xd('mousemove',720,535);time.sleep(.1);xd('mouseup',3)
         click(500,400);assert ink(shot('frame-erased-empty'))==0
         key('a');assert ink(shot('frame-source-unchanged'))==ink(original)
         key('d');assert ink(shot('frame-empty-kept'))==0
@@ -49,15 +49,15 @@ with tempfile.TemporaryDirectory(prefix='mori-frame-') as temp:
         key('alt+2')
         before=shot('frame-menu-before')
         # First frame occupies time zero, followed by frames at .25, .5, ...
-        click(228,791,3);menu=shot('frame-head-menu')
-        click(276,808)  # Copy, the first menu row.
+        click(228,733,3);menu=shot('frame-head-menu')
+        click(276,750)  # Copy, the first menu row.
         copied=shot('frame-head-copied')
         assert head_present(copied),'Copy did not insert a frame at the next grid point'
         key('ctrl+z');undone=shot('frame-head-copy-undone')
         assert not head_present(undone),'Copy did not undo as one step'
         key('ctrl+shift+z')
         # With a three-second demo, one 1/8-beat step is 24.7 screen pixels.
-        click(253,791,3);shot('frame-head-copy-menu');click(280,847)
+        click(253,733,3);shot('frame-head-copy-menu');click(280,789)
         deleted=shot('frame-head-deleted')
         assert not head_present(deleted),'Deleting the copied frame did not remove its head'
         key('ctrl+z')

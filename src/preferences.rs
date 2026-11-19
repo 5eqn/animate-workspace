@@ -20,11 +20,30 @@ pub struct BrushDefaults {
 impl Default for BrushDefaults {
     fn default() -> Self {
         Self {
-            ink: 42.0,
+            ink: 6.0,
             liquify: 240.0,
             marker: 42.0,
             eraser: 42.0,
         }
+    }
+}
+/// Older settings stored one size group per blend mode. The first group
+/// becomes the shared default, preserving the user's first-layer choices.
+fn read_brush_defaults<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BrushDefaults, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Saved {
+        Shared(BrushDefaults),
+        PerLayer(Vec<BrushDefaults>),
+    }
+    match Saved::deserialize(deserializer)? {
+        Saved::Shared(defaults) => Ok(defaults),
+        Saved::PerLayer(defaults) => defaults
+            .into_iter()
+            .next()
+            .ok_or_else(|| serde::de::Error::custom("Missing brush defaults")),
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -76,7 +95,8 @@ pub struct Preferences {
     pub video_delay_ms: f64,
     pub pause_behavior: PauseBehavior,
     pub timeline_follow: bool,
-    pub brush_defaults: [BrushDefaults; 6],
+    #[serde(deserialize_with = "read_brush_defaults")]
+    pub brush_defaults: BrushDefaults,
     pub default_aspect: f32,
     pub default_step: f64,
     pub default_watermark: bool,
@@ -97,12 +117,7 @@ impl Default for Preferences {
             video_delay_ms: -64.0,
             pause_behavior: PauseBehavior::default(),
             timeline_follow: true,
-            brush_defaults: [6.0, 42.0, 42.0, 42.0, 100.0, 140.0].map(|ink| BrushDefaults {
-                ink,
-                liquify: 240.0,
-                marker: 42.0,
-                eraser: 42.0,
-            }),
+            brush_defaults: BrushDefaults::default(),
             default_aspect: 2.39,
             default_step: 0.125,
             default_watermark: true,
@@ -164,7 +179,7 @@ impl Preferences {
         }
     }
     pub fn layer(&self, name: &str, blend: Blend) -> Layer {
-        let defaults = &self.brush_defaults[blend.shader_id() as usize];
+        let defaults = &self.brush_defaults;
         let mut layer = Layer::new(name, blend, defaults.ink);
         layer.liquify_width = defaults.liquify;
         layer.marker_width = defaults.marker;
@@ -180,17 +195,12 @@ impl Preferences {
         document.settings.export.start = 0.0;
         document.settings.export.end = document.timing.duration;
         document.layers = vec![
-            {
-                let mut layer = self.layer("Paper", Blend::Base);
-                layer.blend = Blend::Xor;
-                layer
-            },
+            self.layer("Paper", Blend::Xor),
             {
                 let mut layer = self.layer("Ink", Blend::Xor);
                 layer.brush = Brush::Marker;
                 layer
             },
-            self.layer("Movement", Blend::Move),
             self.layer("Atmosphere", Blend::Blur),
         ];
         if self.language.chinese(&i18n::system_locale()) {
@@ -227,11 +237,14 @@ impl Preferences {
             && self.export.width >= 2
             && self.export.fps > 0
             && self.export.crf <= 51
-            && self.brush_defaults.iter().all(|b| {
-                [b.ink, b.liquify, b.marker, b.eraser]
-                    .iter()
-                    .all(|v| v.is_finite() && *v > 0.0)
-            })
+            && [
+                self.brush_defaults.ink,
+                self.brush_defaults.liquify,
+                self.brush_defaults.marker,
+                self.brush_defaults.eraser,
+            ]
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0)
             && self.onion.opacity.is_finite()
             && (0.0..=1.0).contains(&self.onion.opacity)
             && self.onion.falloff.is_finite()
@@ -393,7 +406,7 @@ mod tests {
         let path = dir.path().join("settings/preferences.json");
         let (mut store, mut prefs, _) = PreferenceStore::at(path.clone());
         prefs.video_delay_ms = -73.0;
-        prefs.brush_defaults[1].liquify = 420.0;
+        prefs.brush_defaults.liquify = 420.0;
         prefs.onion.enabled = false;
         store.save_if_changed(&prefs).unwrap();
         let (_, loaded, warning) = PreferenceStore::at(path);
@@ -481,6 +494,50 @@ mod pause_tests {
 mod new_default_tests {
     use super::*;
     #[test]
+    fn shared_defaults_and_legacy_first_layer_sizes_apply_to_every_layer() {
+        let p = Preferences::default();
+        let doc = p.new_document();
+        assert_eq!(doc.layers.len(), 3);
+        assert_eq!(
+            doc.layers.iter().map(|l| l.blend).collect::<Vec<_>>(),
+            [Blend::Xor, Blend::Xor, Blend::Blur]
+        );
+        assert_eq!(doc.layers[2].brush, Brush::Marker);
+        assert_eq!(p.layer("Blur", Blend::Blur).brush, Brush::Marker);
+        for layer in &doc.layers {
+            assert_eq!(
+                (
+                    layer.width,
+                    layer.marker_width,
+                    layer.liquify_width,
+                    layer.eraser_width
+                ),
+                (6.0, 42.0, 240.0, 42.0)
+            );
+        }
+        let mut legacy = serde_json::to_value(&p).unwrap();
+        let mut first = legacy["brush_defaults"].clone();
+        first["ink"] = 17.0.into();
+        first["liquify"] = 320.0.into();
+        let other = serde_json::json!({"ink":99,"liquify":150,"marker":84,"eraser":70});
+        legacy["brush_defaults"] = serde_json::json!([first, other, other, other, other, other]);
+        let migrated: Preferences = serde_json::from_value(legacy).unwrap();
+        for blend in Blend::OVERLAYS {
+            let layer = migrated.layer("Test", blend);
+            assert_eq!(
+                (
+                    layer.width,
+                    layer.marker_width,
+                    layer.liquify_width,
+                    layer.eraser_width
+                ),
+                (17.0, 42.0, 320.0, 42.0)
+            );
+        }
+        let saved = serde_json::to_value(&migrated).unwrap();
+        assert!(saved["brush_defaults"].is_object());
+    }
+    #[test]
     fn defaults_have_zero_minimum_three_onions_and_watermark_enabled() {
         let p = Preferences::default();
         assert_eq!(p.minimum_pressure, 0.0);
@@ -499,13 +556,13 @@ mod new_default_tests {
             default_watermark: false,
             ..Default::default()
         };
-        p.brush_defaults[1].marker = 78.0;
+        p.brush_defaults.marker = 78.0;
         let mut doc = p.new_document();
         assert!(!doc.settings.watermark);
         doc.settings.watermark = true;
         assert!(!p.new_document().settings.watermark);
         assert_eq!(doc.layers[1].brush_width(Brush::Marker), 78.0);
-        assert_eq!(doc.layers[1].brush_width(Brush::Ink), 42.0);
+        assert_eq!(doc.layers[1].brush_width(Brush::Ink), 6.0);
     }
 }
 
@@ -567,14 +624,15 @@ mod settings_transfer_tests {
     fn follow_and_eraser_defaults_migrate_and_persist_independently() {
         let mut legacy = serde_json::to_value(Preferences::default()).unwrap();
         legacy.as_object_mut().unwrap().remove("timeline_follow");
-        for defaults in legacy["brush_defaults"].as_array_mut().unwrap() {
-            defaults.as_object_mut().unwrap().remove("eraser");
-        }
+        legacy["brush_defaults"]
+            .as_object_mut()
+            .unwrap()
+            .remove("eraser");
         let mut prefs: Preferences = serde_json::from_value(legacy).unwrap();
         assert!(prefs.timeline_follow);
-        assert_eq!(prefs.brush_defaults[0].eraser, 42.0);
+        assert_eq!(prefs.brush_defaults.eraser, 42.0);
         prefs.timeline_follow = false;
-        prefs.brush_defaults[0].eraser = 96.0;
+        prefs.brush_defaults.eraser = 96.0;
         let dir = tempfile::tempdir().unwrap();
         let (mut store, _, _) = PreferenceStore::at(dir.path().join("prefs.json"));
         store.save_if_changed(&prefs).unwrap();
@@ -603,7 +661,7 @@ mod settings_transfer_tests {
             minimum_pressure: 0.12,
             ..Default::default()
         };
-        preferences.brush_defaults[0].marker = 87.0;
+        preferences.brush_defaults.marker = 87.0;
         preferences.onion.before = [10, 20, 30];
         preferences.pause_behavior = PauseBehavior::KeepPlayhead;
         export_settings(&path, &preferences).unwrap();
