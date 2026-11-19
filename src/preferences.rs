@@ -154,7 +154,7 @@ impl Preferences {
         let mut document = Document::default();
         document.settings.aspect = self.default_aspect;
         document.settings.watermark = self.default_watermark;
-        document.timing.step = self.default_step;
+        document.timing.tempos[0].division = 1.0 / self.default_step;
         self.apply_output(&mut document.settings.export);
         document.settings.export.start = 0.0;
         document.settings.export.end = document.timing.duration;
@@ -164,7 +164,11 @@ impl Preferences {
                 layer.blend = Blend::Xor;
                 layer
             },
-            self.layer("Ink", Blend::Xor),
+            {
+                let mut layer = self.layer("Ink", Blend::Xor);
+                layer.brush = Brush::Marker;
+                layer
+            },
             self.layer("Movement", Blend::Move),
             self.layer("Atmosphere", Blend::Blur),
         ];

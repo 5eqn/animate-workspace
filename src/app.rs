@@ -71,7 +71,6 @@ pub struct Studio {
     layer_scroll: f32,
     page: Page,
     return_page: Page,
-    tool: Tool,
     layer: usize,
     time: f64,
     mirror: bool,
@@ -80,6 +79,8 @@ pub struct Studio {
     renderer: Arc<Mutex<Renderer>>,
     transport: Transport,
     play_origin: f64,
+    play_timeline_start: f64,
+    play_timeline_zoom: f32,
     drawing: Option<Drawing>,
     tablet: Tablet,
     audio_bytes: Option<Arc<Vec<u8>>>,
@@ -140,7 +141,6 @@ impl Studio {
             history: History::default(),
             page: Page::Canvas,
             return_page: Page::Canvas,
-            tool: Tool::Ink,
             layer: 0,
             time: 0.0,
             mirror: false,
@@ -149,6 +149,8 @@ impl Studio {
             renderer,
             transport: Transport::default(),
             play_origin: 0.0,
+            play_timeline_start: 0.0,
+            play_timeline_zoom: 1.0,
             drawing: None,
             tablet: Tablet::new(cc.egui_ctx.clone()),
             audio_bytes: None,
@@ -292,13 +294,17 @@ impl Studio {
                 self.layer = self.layer.saturating_sub(1);
             }
             "Smaller" | "Larger" => {
+                if self.doc.layers[self.layer].brush == Brush::Fill {
+                    return;
+                }
                 if self.drawing.as_ref().is_none_or(|d| !d.recorded) {
                     self.record();
                     if let Some(drawing) = &mut self.drawing {
                         drawing.recorded = true;
                     }
                 }
-                let width = self.doc.layers[self.layer].brush_width_mut(self.tool);
+                let brush = self.doc.layers[self.layer].brush;
+                let width = self.doc.layers[self.layer].brush_width_mut(brush);
                 *width = if action == "Larger" {
                     (*width * 1.15).max(*width + 1.0)
                 } else {
@@ -429,12 +435,20 @@ impl Studio {
                 self.playback_time(),
             );
             self.set_time(t);
+            if self.preferences.pause_behavior == PauseBehavior::ReturnToStart {
+                self.timeline_start = self.play_timeline_start;
+                self.timeline_zoom = self.play_timeline_zoom;
+            }
         } else {
             if self.time >= self.doc.timing.duration {
                 self.time = 0.0;
             }
             match self.transport.play(self.time) {
-                Ok(()) => self.play_origin = self.time,
+                Ok(()) => {
+                    self.play_origin = self.time;
+                    self.play_timeline_start = self.timeline_start;
+                    self.play_timeline_zoom = self.timeline_zoom;
+                }
                 Err(error) => self.fail(error),
             }
         }
@@ -752,7 +766,7 @@ impl Studio {
         }
     }
     fn start_stroke(&mut self, point: Point) {
-        if self.tool == Tool::Eraser {
+        if self.doc.layers[self.layer].brush == Tool::Eraser {
             let cel = self.doc.layers[self.layer].held(tick(self.time));
             let index = EraserIndex::new(cel.map_or(&Cel::default(), |c| c));
             self.drawing = Some(Drawing {
@@ -769,10 +783,11 @@ impl Studio {
             return;
         }
         self.record();
-        let liquify = self.tool == Tool::Liquify;
+        let brush = self.doc.layers[self.layer].brush;
+        let liquify = brush == Tool::Liquify;
         let time = tick(self.time);
         let layer = self.layer;
-        let width = self.doc.layers[layer].brush_width(self.tool);
+        let width = self.doc.layers[layer].brush_width(self.doc.layers[self.layer].brush);
         let movement = self.doc.layers[layer].blend == Blend::Move;
         let cel = self.doc.layers[layer].begin_edit(time, liquify);
         let index = if liquify {
@@ -782,7 +797,7 @@ impl Studio {
                 cel.strokes.clear();
             }
             let mut stroke = Stroke::new(width, point);
-            stroke.brush = self.tool;
+            stroke.brush = brush;
             cel.strokes.push(Arc::new(stroke));
             None
         };
@@ -819,8 +834,7 @@ impl Studio {
                 self.record();
                 drawing.recorded = true;
             }
-            let cel = self.doc.layers[drawing.layer].begin_edit(drawing.time, true);
-            cel.strokes.retain(|stroke| !hits.contains(&stroke.id));
+            self.doc.layers[drawing.layer].erase_at(drawing.time, &hits);
         }
         drawing.last = point;
         self.drawing = Some(drawing);
@@ -835,6 +849,12 @@ impl Studio {
         };
         let delta = [point.x - drawing.last.x, point.y - drawing.last.y];
         let distance = drawing.last.distance(point);
+        if self.doc.layers[drawing.layer].blend != Blend::Move
+            && self.doc.layers[drawing.layer].brush == Tool::Fill
+        {
+            drawing.last = point;
+            return;
+        }
         if distance < 0.001 {
             if !drawing.liquify {
                 let cel = Arc::make_mut(
@@ -1117,6 +1137,97 @@ impl Studio {
             std::fs::create_dir_all(&directory).unwrap();
             let mut renderer = self.renderer.lock().unwrap();
             let mut outputs = Vec::new();
+            // Moving or blurring near a page edge retains the vector content
+            // beyond that edge; only the final camera rectangle is cropped.
+            for blur in [false, true] {
+                let mut edge = Document::default();
+                edge.settings.watermark = false;
+                edge.layers.truncate(1);
+                let dot = Point {
+                    x: 0.0,
+                    y: 200.0,
+                    pressure: 1.0,
+                    angle: 0.0,
+                };
+                edge.layers[0]
+                    .begin_edit(0, false)
+                    .strokes
+                    .push(Arc::new(Stroke::new(80.0, dot)));
+                if blur {
+                    let mut layer = Layer::new("Blur", Blend::Blur, 120.0);
+                    layer
+                        .begin_edit(0, false)
+                        .strokes
+                        .push(Arc::new(Stroke::new(120.0, dot)));
+                    edge.layers.push(layer);
+                }
+                let mut reference = edge.clone();
+                for layer in &mut reference.layers {
+                    for stroke in &mut Arc::make_mut(layer.cels.get_mut(&0).unwrap()).strokes {
+                        let stroke = Arc::make_mut(stroke);
+                        stroke.id = next_revision();
+                        for point in &mut stroke.points {
+                            point.x += 200.0;
+                        }
+                    }
+                }
+                let mut movement = Layer::new("Move", Blend::Move, 100.0);
+                let mut path = Stroke::new(100.0, dot);
+                path.points.push(Point { x: 200.0, ..dot });
+                movement.begin_edit(0, false).strokes.push(Arc::new(path));
+                edge.layers.push(movement);
+                let actual =
+                    unsafe { renderer.read_frame(gl, &edge.scene(0), [960, 402]).unwrap() };
+                let expected = unsafe {
+                    renderer
+                        .read_frame(gl, &reference.scene(0), [960, 402])
+                        .unwrap()
+                };
+                let mismatch = actual
+                    .iter()
+                    .zip(&expected)
+                    .filter(|(a, b)| a.abs_diff(**b) > 4)
+                    .count();
+                assert!(
+                    mismatch < 200,
+                    "Off-canvas geometry was cropped: {mismatch}, blur={blur}"
+                );
+            }
+            let mut fill = Document::default();
+            fill.settings.watermark = false;
+            fill.layers.truncate(1);
+            let point = Point {
+                x: 500.0,
+                y: 200.0,
+                pressure: 1.0,
+                angle: 0.0,
+            };
+            let mut stroke = Stroke::new(42.0, point);
+            stroke.brush = Brush::Fill;
+            fill.layers[0]
+                .begin_edit(0, false)
+                .strokes
+                .push(Arc::new(stroke));
+            let mut movement = Layer::new("Move", Blend::Move, 100.0);
+            let mut path = Stroke::new(100.0, point);
+            path.points.push(Point {
+                x: 1700.0,
+                y: 600.0,
+                ..point
+            });
+            movement.begin_edit(0, false).strokes.push(Arc::new(path));
+            fill.layers.push(movement);
+            let pixels = unsafe { renderer.read_frame(gl, &fill.scene(0), [960, 402]).unwrap() };
+            assert!(
+                pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|p| p[0] < 3 && p[1] < 3 && p[2] < 3),
+                "Fill lost its infinite coverage after movement"
+            );
+            outputs.push("Off-canvas dots and local blur move into view intact; infinite fill stays black after translation".into());
+
             for (name, blend, style) in [
                 ("ink", Blend::Base, Style::Clean),
                 ("move", Blend::Move, Style::Clean),

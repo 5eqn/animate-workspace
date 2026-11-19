@@ -72,7 +72,7 @@ with tempfile.TemporaryDirectory(prefix='mori-erase-follow-') as temp:
         a, b = (440, 390, 660, 410), (790, 510, 1010, 530)
         assert ink(before, a) > 300 and ink(before, b) > 300
         key('d')  # The new time holds the earlier drawing.
-        brush(720, 540)  # Down selects Eraser.
+        brush(688, 525)  # Select Eraser on the five-tool wheel.
         drag((540, 350), (540, 450))  # Both endpoints miss; the sweep must hit.
         erased = shot('erase-held')
         assert ink(erased, a) == 0, 'A whole stroke was not erased by the sweep'
@@ -89,6 +89,7 @@ with tempfile.TemporaryDirectory(prefix='mori-erase-follow-') as temp:
         key('ctrl+z')
         assert ink(shot('erase-miss-undo'), a) == ink(before, a), 'An eraser miss consumed an undo step'
         # One gesture touches both strokes and must undo as a single operation.
+        key('a')  # Erase the earliest drawing; no earlier drawing remains to hold.
         drag((540, 400), (900, 520))
         both = shot('erase-two-strokes')
         assert ink(both, a) == 0 and ink(both, b) == 0
@@ -110,6 +111,7 @@ with tempfile.TemporaryDirectory(prefix='mori-erase-follow-') as temp:
             xd('mousemove', 800, 453, 'keydown', 'ctrl', 'click', '--repeat', 3, '--delay', 40, 4, 'keyup', 'ctrl')
             time.sleep(.5)
             # Start at zero and allow the follow behavior to settle for one frame.
+            before_play = shot('follow-before-play-' + str(follow))
             key('space')
             time.sleep(.1)
             first = shot('follow-start-' + str(follow))
@@ -131,6 +133,12 @@ with tempfile.TemporaryDirectory(prefix='mori-erase-follow-') as temp:
                 zoomed = shot('follow-maximum-zoom')
                 assert max(zoomed.getpixel((x, 920))[2] for x in range(225, 1400)) > 190, 'Playhead escaped the view at maximum zoom'
             key('space')
+            returned = shot('follow-paused-view-' + str(follow))
+            before_ticks = before_play.crop((225, 465, 1400, 473))
+            after_ticks = returned.crop((225, 465, 1400, 473))
+            for image in [before_ticks, after_ticks]:
+                image.putdata([(17, 18, 20) if max(p) > 60 else p for p in image.getdata()])
+            assert ImageChops.difference(before_ticks, after_ticks).getbbox() is None, 'Pause did not restore the timeline view'
             key('ctrl+comma')
             click(90, 268)
             shot('follow-preference-' + str(follow))

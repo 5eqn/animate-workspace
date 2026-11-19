@@ -220,38 +220,6 @@ fn number(
     )
     .changed()
 }
-fn step_label(step: f64) -> String {
-    if step < 1.0 {
-        format!("1/{}", (1.0 / step).round() as u32)
-    } else {
-        format!("{step:.0}")
-    }
-}
-fn step_control(ui: &mut egui::Ui, step: &mut f64) -> bool {
-    let mut changed = false;
-    egui::ComboBox::from_id_salt(ui.next_auto_id())
-        .selected_text(step_label(*step))
-        .width(88.0)
-        .show_ui(ui, |ui| {
-            for value in [
-                1.0 / 32.0,
-                1.0 / 16.0,
-                1.0 / 12.0,
-                1.0 / 8.0,
-                1.0 / 6.0,
-                1.0 / 4.0,
-                1.0 / 3.0,
-                0.5,
-                1.0,
-                2.0,
-            ] {
-                changed |= ui
-                    .selectable_value(step, value, step_label(value))
-                    .changed();
-            }
-        });
-    changed
-}
 fn menu_surface(ui: &mut egui::Ui) {
     ui.set_width(224.0);
     ui.spacing_mut().item_spacing = Vec2::new(8.0, 5.0);
@@ -278,13 +246,19 @@ fn menu_row(ui: &mut egui::Ui, name: &str, control: impl FnOnce(&mut egui::Ui)) 
         control,
     );
 }
-fn wheel_directions() -> [(Brush, f32); 4] {
-    [
-        (Brush::Ink, -std::f32::consts::FRAC_PI_2),
-        (Brush::Marker, std::f32::consts::PI / 6.0),
-        (Brush::Liquify, 5.0 * std::f32::consts::PI / 6.0),
-        (Brush::Eraser, std::f32::consts::FRAC_PI_2),
-    ]
+fn wheel_directions() -> [(Brush, f32); 5] {
+    std::array::from_fn(|i| {
+        (
+            [
+                Brush::Ink,
+                Brush::Marker,
+                Brush::Fill,
+                Brush::Eraser,
+                Brush::Liquify,
+            ][i],
+            -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::TAU / 5.0,
+        )
+    })
 }
 fn wheel_choice(center: Pos2, pos: Pos2) -> Option<Brush> {
     let d = pos - center;
@@ -314,6 +288,23 @@ fn brush_icon(p: &egui::Painter, c: Pos2, brush: Brush, color: Color32) {
             .map(|p| Pos2::new(p[0], p[1]))
             .to_vec();
             p.add(egui::Shape::convex_polygon(corners, color, UiStroke::NONE));
+        }
+        Brush::Fill => {
+            let corners = vec![
+                c + Vec2::new(-10.0, 0.0),
+                c + Vec2::new(0.0, -10.0),
+                c + Vec2::new(10.0, 0.0),
+                c + Vec2::new(0.0, 10.0),
+            ];
+            p.add(PathShape::closed_line(
+                corners,
+                UiStroke::new(1.5_f32, color),
+            ));
+            p.line_segment(
+                [c + Vec2::new(-6.0, 0.0), c + Vec2::new(6.0, 0.0)],
+                UiStroke::new(1.5_f32, color),
+            );
+            p.circle_filled(c + Vec2::new(11.0, 9.0), 2.0, color);
         }
         Brush::Eraser => {
             let points = vec![
@@ -403,13 +394,15 @@ impl Studio {
             self.cursor(
                 &painter,
                 pos,
-                self.doc.layers[self.layer].brush_width(self.tool) * width / 3840.0,
+                self.doc.layers[self.layer].brush_width(self.doc.layers[self.layer].brush) * width
+                    / 3840.0,
             );
         } else if self.resized.elapsed() < Duration::from_millis(1000) {
             self.cursor(
                 &painter,
                 workspace.center(),
-                self.doc.layers[self.layer].brush_width(self.tool) * width / 3840.0,
+                self.doc.layers[self.layer].brush_width(self.doc.layers[self.layer].brush) * width
+                    / 3840.0,
             );
         }
     }
@@ -440,7 +433,10 @@ impl Studio {
                 if !pressed {
                     if let Some(center) = self.brush_wheel.take() {
                         if let Some(brush) = wheel_choice(center, pos) {
-                            self.tool = brush;
+                            if self.doc.layers[self.layer].brush != brush {
+                                self.doc.layers[self.layer].brush = brush;
+                                self.dirty = true;
+                            }
                         }
                     }
                 }
@@ -451,32 +447,16 @@ impl Studio {
             let selected = ctx
                 .input(|i| i.pointer.latest_pos())
                 .and_then(|p| wheel_choice(center, p))
-                .unwrap_or(self.tool);
+                .unwrap_or(self.doc.layers[self.layer].brush);
             let p = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
                 Id::new("brush_wheel"),
             ));
             p.circle_filled(center, 82.0, PANEL);
             p.circle_stroke(center, 82.0, UiStroke::new(1.0_f32, LINE));
-            let directions = [
-                wheel_directions()[0],
-                wheel_directions()[1],
-                wheel_directions()[3],
-                wheel_directions()[2],
-            ];
-            for (index, &(brush, angle)) in directions.iter().enumerate() {
-                let previous = if index == 0 {
-                    directions[3].1 - std::f32::consts::TAU
-                } else {
-                    directions[index - 1].1
-                };
-                let next = if index == 3 {
-                    directions[0].1 + std::f32::consts::TAU
-                } else {
-                    directions[index + 1].1
-                };
-                let from = (previous + angle) * 0.5;
-                let to = (angle + next) * 0.5;
+            for (brush, angle) in wheel_directions() {
+                let from = angle - std::f32::consts::PI / 5.0;
+                let to = angle + std::f32::consts::PI / 5.0;
                 let mut points = vec![center];
                 for i in 0..=32 {
                     let a = from + i as f32 / 32.0 * (to - from);
@@ -503,7 +483,36 @@ impl Studio {
         }
     }
     fn cursor(&self, p: &egui::Painter, pos: Pos2, r: f32) {
-        if self.tool == Tool::Marker {
+        if self.doc.layers[self.layer].blend == Blend::Move {
+            for axis in [Vec2::X, Vec2::Y] {
+                let side = Vec2::new(-axis.y, axis.x);
+                p.line_segment(
+                    [pos - axis * 11.0, pos + axis * 11.0],
+                    UiStroke::new(3.0_f32, Color32::WHITE),
+                );
+                for sign in [-1.0, 1.0] {
+                    let tip = pos + axis * (11.0 * sign);
+                    p.line_segment(
+                        [tip - axis * (4.0 * sign) + side * 4.0, tip],
+                        UiStroke::new(1.3_f32, Color32::from_gray(64)),
+                    );
+                    p.line_segment(
+                        [tip - axis * (4.0 * sign) - side * 4.0, tip],
+                        UiStroke::new(1.3_f32, Color32::from_gray(64)),
+                    );
+                }
+                p.line_segment(
+                    [pos - axis * 11.0, pos + axis * 11.0],
+                    UiStroke::new(1.0_f32, Color32::from_gray(64)),
+                );
+            }
+            return;
+        }
+        if self.doc.layers[self.layer].brush == Tool::Fill {
+            brush_icon(p, pos, Brush::Fill, Color32::from_gray(90));
+            return;
+        }
+        if self.doc.layers[self.layer].brush == Tool::Marker {
             let angle = self.tablet.angle().map_or(0.0, |a| {
                 if self.mirror {
                     std::f32::consts::PI - a
@@ -542,7 +551,7 @@ impl Studio {
                 UiStroke::new(0.8_f32, Color32::from_gray(64)),
             );
         }
-        if self.tool == Tool::Liquify {
+        if self.doc.layers[self.layer].brush == Tool::Liquify {
             p.circle_filled(pos, 1.2, Color32::from_gray(90));
         }
     }
@@ -769,7 +778,7 @@ impl Studio {
             );
         }
         let wave_response = ui
-            .interact(wave, Id::new("wave_context"), Sense::click())
+            .interact(wave, Id::new("wave_context"), Sense::click_and_drag())
             .on_hover_cursor(egui::CursorIcon::PointingHand);
         if self.background.is_none() {
             let dropped = ctx.input(|i| {
@@ -781,6 +790,14 @@ impl Studio {
             if let Some(path) = dropped {
                 self.import_audio_path(path);
             }
+        }
+        if wave_response.hovered() && self.doc.audio.is_some() {
+            p.rect_stroke(
+                wave,
+                5.0,
+                UiStroke::new(1.0_f32, ACCENT),
+                egui::StrokeKind::Inside,
+            );
         }
         wave_response.context_menu(|ui| {
             menu_surface(ui);
@@ -824,6 +841,11 @@ impl Studio {
         }
         let before = self.doc.clone();
         let mut changed = false;
+        if wave_response.dragged_by(PointerButton::Primary) {
+            if let Some(pos) = wave_response.interact_pointer_pos() {
+                self.set_time(at(pos));
+            }
+        }
         let mut remove_tempo = None;
         for i in 0..self.doc.timing.tempos.len() {
             let t = self.doc.timing.tempos[i];
@@ -835,6 +857,15 @@ impl Studio {
             diamond(&p, Pos2::new(px + 4.0, marker.center().y), 3.0, ACCENT);
             let marker_response =
                 ui.interact(marker, Id::new(("tempo", i)), Sense::click_and_drag());
+            if marker_response.hovered() || marker_response.dragged() {
+                p.rect_filled(marker, 4.0, Color32::from_rgb(30, 34, 43));
+                diamond(&p, Pos2::new(px + 4.0, marker.center().y), 4.0, INK);
+                ctx.set_cursor_icon(if marker_response.dragged() {
+                    egui::CursorIcon::Grabbing
+                } else {
+                    egui::CursorIcon::Grab
+                });
+            }
             label(
                 &p,
                 Pos2::new(px + 15.0, marker.center().y),
@@ -867,6 +898,15 @@ impl Studio {
                             .suffix(" BPM"),
                     )
                     .changed();
+                menu_row(ui, "Division", |ui| {
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut self.doc.timing.tempos[i].division)
+                                .range(0.125..=128.0)
+                                .speed(1.0),
+                        )
+                        .changed();
+                });
                 menu_row(ui, "Bars / group", |ui| {
                     changed |= ui
                         .add(
@@ -914,10 +954,6 @@ impl Studio {
                 add_tempo = Some(self.time);
                 ui.close_menu();
             }
-            ui.horizontal(|ui| {
-                ui.label(tr_ui(ui, "Grid"));
-                changed |= step_control(ui, &mut self.doc.timing.step);
-            });
         });
         if response.double_clicked() {
             if let Some(pos) = response.interact_pointer_pos() {
@@ -938,8 +974,6 @@ impl Studio {
         self.layer_tracks(ui, ctx, &p, rect, rows, tracks, start, span);
         if self.frame_drag.is_none()
             && (response.clicked() || response.dragged_by(PointerButton::Primary))
-            && !wave.contains(response.interact_pointer_pos().unwrap_or(Pos2::ZERO))
-            && !tempo.contains(response.interact_pointer_pos().unwrap_or(Pos2::ZERO))
         {
             if let Some(pos) = response.interact_pointer_pos() {
                 self.set_time(at(pos));
@@ -1002,10 +1036,29 @@ impl Studio {
             if !row_rect.intersects(rows) {
                 continue;
             }
+            let context = ui.interact(
+                row_rect.intersect(Rect::from_min_max(
+                    Pos2::new(tracks.left(), rows.top()),
+                    rows.max,
+                )),
+                Id::new(("exposure_row", i)),
+                Sense::click_and_drag(),
+            );
+            if context.hovered() {
+                p.rect_filled(context.rect, 4.0, Color32::from_rgb(27, 30, 38));
+            }
             let selected = i == self.layer;
             let layer = &self.doc.layers[i];
             if selected {
-                p.rect_filled(row_rect, 4.0, Color32::from_rgb(25, 27, 32));
+                p.rect_filled(
+                    row_rect,
+                    4.0,
+                    if context.hovered() {
+                        Color32::from_rgb(30, 34, 43)
+                    } else {
+                        Color32::from_rgb(25, 27, 32)
+                    },
+                );
                 p.line_segment(
                     [
                         row_rect.left_top() + Vec2::new(0.0, 14.0),
@@ -1105,26 +1158,50 @@ impl Studio {
                     }
                 }
             }
-            let context = ui.interact(
-                row_rect.intersect(Rect::from_min_max(
-                    Pos2::new(tracks.left(), rows.top()),
-                    rows.max,
-                )),
-                Id::new(("exposure_row", i)),
-                Sense::click_and_drag(),
-            );
+            let frame_head = |pos: Pos2| -> Option<Tick> {
+                if !(y + 10.0..=y + HEIGHT - 10.0).contains(&pos.y) {
+                    return None;
+                }
+                keys.iter().copied().find(|time| {
+                    let px = x(seconds(*time));
+                    px >= tracks.left() - 1.0
+                        && px <= tracks.right()
+                        && (pos.x - (px + 6.0)).abs() <= 9.0
+                })
+            };
+            if context.hovered() {
+                if let Some(pos) = ctx.input(|input| input.pointer.hover_pos()) {
+                    if let Some(time) = frame_head(pos) {
+                        diamond(
+                            &p,
+                            Pos2::new(x(seconds(time)) + 6.0, y + HEIGHT * 0.5),
+                            4.0,
+                            INK,
+                        );
+                        ctx.set_cursor_icon(egui::CursorIcon::Grab);
+                    } else {
+                        let time = self.doc.timing.snap(
+                            start
+                                + ((pos.x - tracks.left()) / tracks.width()).clamp(0.0, 1.0) as f64
+                                    * span,
+                        );
+                        p.vline(
+                            x(time),
+                            rows.y_range(),
+                            UiStroke::new(
+                                1.0_f32,
+                                Color32::from_rgba_unmultiplied(183, 193, 221, 75),
+                            ),
+                        );
+                        ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+                    }
+                }
+            }
             if context.drag_started() {
-                let origin = ctx
-                    .input(|input| input.pointer.press_origin())
-                    .or_else(|| context.interact_pointer_pos());
-                if let Some(pos) = origin {
-                    let time = start
-                        + ((pos.x - tracks.left()) / tracks.width()).clamp(0.0, 1.0) as f64 * span;
-                    if let Some((&from, _)) =
-                        self.doc.layers[i].cels.range(..=tick(time)).next_back()
-                    {
+                if let Some(origin) = ctx.input(|input| input.pointer.press_origin()) {
+                    self.layer = i;
+                    if let Some(from) = frame_head(origin) {
                         self.frame_drag = Some((i, from, from));
-                        self.layer = i;
                         self.transport.stop();
                     }
                 }
@@ -1133,15 +1210,25 @@ impl Studio {
                 if let Some((layer, from, _)) = self.frame_drag {
                     if layer == i {
                         if let Some(pos) = context.interact_pointer_pos() {
-                            let time = start
-                                + ((pos.x - tracks.left()) / tracks.width()).clamp(0.0, 1.0) as f64
-                                    * span;
-                            let to = tick(self.doc.timing.snap(time));
+                            let origin = ctx
+                                .input(|input| input.pointer.press_origin())
+                                .unwrap_or(pos);
+                            let to = tick(self.doc.timing.snap(
+                                seconds(from)
+                                    + (pos.x - origin.x) as f64 / tracks.width() as f64 * span,
+                            ));
                             self.frame_drag = Some((i, from, to));
                             self.time = seconds(to);
                             ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
                         }
                     }
+                } else if let Some(pos) = context.interact_pointer_pos() {
+                    self.layer = i;
+                    self.set_time(
+                        start
+                            + ((pos.x - tracks.left()) / tracks.width()).clamp(0.0, 1.0) as f64
+                                * span,
+                    );
                 }
             }
             if context.drag_stopped() {
@@ -1152,17 +1239,15 @@ impl Studio {
                     }
                 }
             }
-            if context.hovered() {
-                ctx.set_cursor_icon(egui::CursorIcon::Grab);
-            }
             if context.clicked() {
                 self.layer = i;
                 if let Some(pos) = context.interact_pointer_pos() {
-                    self.set_time(
+                    let time = frame_head(pos).map(seconds).unwrap_or_else(|| {
                         start
                             + ((pos.x - tracks.left()) / tracks.width()).clamp(0.0, 1.0) as f64
-                                * span,
-                    );
+                                * span
+                    });
+                    self.set_time(time);
                 }
             }
             for response in [&label_response, &context] {
@@ -1211,16 +1296,7 @@ impl Studio {
                                 });
                         });
                     }
-                    menu_row(ui, "Visible", |ui| {
-                        changed |= toggle(ui, &mut layer.visible).changed();
-                    });
-                    menu_row(ui, "Invert", |ui| {
-                        changed |= toggle(ui, &mut layer.inverted).changed();
-                    });
                     if layer.blend.effect() {
-                        menu_row(ui, "Amount", |ui| {
-                            changed |= number(ui, &mut layer.strength, "", 0.0..=3.0);
-                        });
                         menu_row(ui, "Style", |ui| {
                             egui::ComboBox::from_id_salt(("style", i))
                                 .width(124.0)
@@ -1242,22 +1318,6 @@ impl Studio {
                     ui.separator();
                     if ui.button(tr_ui(ui, "New layer")).clicked() {
                         create = true;
-                        ui.close_menu();
-                    }
-                    if ui.button(tr_ui(ui, "Blank exposure")).clicked() {
-                        layer.cels.insert(tick(self.time), Arc::default());
-                        changed = true;
-                        ui.close_menu();
-                    }
-                    if ui
-                        .add_enabled(
-                            layer.cels.contains_key(&tick(self.time)),
-                            egui::Button::new(tr_ui(ui, "Remove exposure")),
-                        )
-                        .clicked()
-                    {
-                        layer.cels.remove(&tick(self.time));
-                        changed = true;
                         ui.close_menu();
                     }
                     if can_delete
@@ -1450,15 +1510,15 @@ impl Studio {
                                     )
                                     .changed();
                             });
-                            row(ui, "Grid · beats", |ui| {
-                                local_changed |= step_control(ui, &mut self.doc.timing.step);
-                            });
                             group(ui, "New projects");
                             row(ui, "Default aspect ratio", |ui| {
                                 number(ui, &mut self.preferences.default_aspect, ": 1", 0.2..=8.0);
                             });
-                            row(ui, "Default grid · beats", |ui| {
-                                step_control(ui, &mut self.preferences.default_step);
+                            row(ui, "Default division", |ui| {
+                                let mut division=1.0/self.preferences.default_step;
+                                if ui.add(egui::DragValue::new(&mut division).range(0.125..=128.0).speed(1.0)).changed() {
+                                    self.preferences.default_step=1.0/division;
+                                }
                             });
                             group(ui,"Rhythm watermark");
                             row(ui,"This project",|ui|{local_changed|=toggle(ui,&mut self.doc.settings.watermark).changed();});
@@ -1578,11 +1638,11 @@ impl Studio {
                             row(ui, "Enabled", |ui| {
                                 toggle(ui, &mut onion.enabled);
                             });
-                            row(ui, "Previous exposures", |ui| {
+                            row(ui, "Previous frames", |ui| {
                                 ui.color_edit_button_srgb(&mut onion.before);
                                 ui.add(egui::DragValue::new(&mut onion.previous).range(0..=12));
                             });
-                            row(ui, "Following exposures", |ui| {
+                            row(ui, "Following frames", |ui| {
                                 ui.color_edit_button_srgb(&mut onion.after);
                                 ui.add(egui::DragValue::new(&mut onion.next).range(0..=12));
                             });
@@ -1815,25 +1875,21 @@ mod tests {
         assert_eq!(followed_start(4.0, 2.0, 1.0), 1.0);
     }
     #[test]
-    fn brush_wheel_keeps_existing_gestures_and_adds_eraser_below() {
-        let center = Pos2::ZERO;
-        assert_eq!(
-            wheel_choice(center, Pos2::new(0.0, -55.0)),
-            Some(Brush::Ink)
-        );
-        assert_eq!(
-            wheel_choice(center, Pos2::new(50.0, 30.0)),
-            Some(Brush::Marker)
-        );
-        assert_eq!(
-            wheel_choice(center, Pos2::new(-50.0, 30.0)),
-            Some(Brush::Liquify)
-        );
-        assert_eq!(
-            wheel_choice(center, Pos2::new(0.0, 55.0)),
-            Some(Brush::Eraser)
-        );
-        assert_eq!(wheel_choice(center, Pos2::new(0.0, 5.0)), None);
+    fn brush_wheel_has_five_equal_sectors() {
+        let directions = wheel_directions();
+        for (i, &(brush, angle)) in directions.iter().enumerate() {
+            assert_eq!(
+                wheel_choice(Pos2::ZERO, Pos2::ZERO + Vec2::angled(angle) * 55.0),
+                Some(brush)
+            );
+            let next = directions[(i + 1) % 5].1;
+            assert!(
+                ((next - angle).rem_euclid(std::f32::consts::TAU) - std::f32::consts::TAU / 5.0)
+                    .abs()
+                    < 1e-6
+            );
+        }
+        assert_eq!(wheel_choice(Pos2::ZERO, Pos2::new(0.0, 5.0)), None);
     }
     #[test]
     fn chinese_catalog_has_renderable_glyphs() {

@@ -197,6 +197,7 @@ pub enum Brush {
     Marker,
     Liquify,
     Eraser,
+    Fill,
 }
 fn default_eraser_width() -> f32 {
     42.0
@@ -215,6 +216,8 @@ pub struct Layer {
     pub inverted: bool,
     pub visible: bool,
     pub width: f32,
+    #[serde(default)]
+    pub brush: Brush,
     #[serde(default = "default_liquify_width")]
     pub liquify_width: f32,
     #[serde(default = "default_marker_width")]
@@ -233,6 +236,7 @@ impl Layer {
             inverted: false,
             visible: true,
             width,
+            brush: Brush::Ink,
             liquify_width: default_liquify_width(),
             marker_width: default_marker_width(),
             eraser_width: default_eraser_width(),
@@ -242,7 +246,7 @@ impl Layer {
     }
     pub fn brush_width(&self, brush: Brush) -> f32 {
         match brush {
-            Brush::Ink => self.width,
+            Brush::Ink | Brush::Fill => self.width,
             Brush::Marker => self.marker_width,
             Brush::Liquify => self.liquify_width,
             Brush::Eraser => self.eraser_width,
@@ -250,7 +254,7 @@ impl Layer {
     }
     pub fn brush_width_mut(&mut self, brush: Brush) -> &mut f32 {
         match brush {
-            Brush::Ink => &mut self.width,
+            Brush::Ink | Brush::Fill => &mut self.width,
             Brush::Marker => &mut self.marker_width,
             Brush::Liquify => &mut self.liquify_width,
             Brush::Eraser => &mut self.eraser_width,
@@ -258,6 +262,13 @@ impl Layer {
     }
     pub fn held(&self, time: Tick) -> Option<&Arc<Cel>> {
         self.cels.range(..=time).next_back().map(|(_, c)| c)
+    }
+    pub fn erase_at(&mut self, time: Tick, hits: &std::collections::HashSet<u64>) {
+        let cel = self.begin_edit(time, true);
+        cel.strokes.retain(|stroke| !hits.contains(&stroke.id));
+        if cel.strokes.is_empty() {
+            self.cels.remove(&time);
+        }
     }
     pub fn begin_edit(&mut self, time: Tick, liquify: bool) -> &mut Cel {
         if !self.cels.contains_key(&time) {
@@ -275,10 +286,15 @@ impl Layer {
 pub struct Tempo {
     pub start: f64,
     pub bpm: f64,
+    #[serde(default = "default_division")]
+    pub division: f64,
     #[serde(default = "default_bars")]
     pub bars: u32,
     #[serde(default = "default_beats")]
     pub beats: u32,
+}
+fn default_division() -> f64 {
+    8.0
 }
 fn default_bars() -> u32 {
     2
@@ -291,6 +307,7 @@ impl Tempo {
         Self {
             start,
             bpm,
+            division: 8.0,
             bars: 2,
             beats: 4,
         }
@@ -303,16 +320,35 @@ impl Tempo {
     }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "TimingFile")]
 pub struct Timing {
     pub tempos: Vec<Tempo>,
-    pub step: f64,
     pub duration: f64,
+}
+#[derive(Deserialize)]
+struct TimingFile {
+    tempos: Vec<Tempo>,
+    #[serde(default)]
+    step: Option<f64>,
+    duration: f64,
+}
+impl From<TimingFile> for Timing {
+    fn from(mut saved: TimingFile) -> Self {
+        if let Some(step) = saved.step {
+            for tempo in &mut saved.tempos {
+                tempo.division = 1.0 / step;
+            }
+        }
+        Self {
+            tempos: saved.tempos,
+            duration: saved.duration,
+        }
+    }
 }
 impl Default for Timing {
     fn default() -> Self {
         Self {
             tempos: vec![Tempo::at(0.0, 120.0)],
-            step: 0.125,
             duration: 8.0,
         }
     }
@@ -324,7 +360,7 @@ impl Timing {
             .saturating_sub(1)
     }
     pub fn step_at(&self, index: usize) -> f64 {
-        60.0 / self.tempos[index].bpm * self.step
+        60.0 / self.tempos[index].bpm / self.tempos[index].division
     }
     pub fn add_start(&mut self, time: f64) -> bool {
         if self.tempos.iter().any(|t| (t.start - time).abs() < 1e-6) {
@@ -607,7 +643,11 @@ impl Default for Document {
             name: "Untitled motion".into(),
             layers: vec![
                 Layer::new("Paper", Blend::Xor, 6.0),
-                Layer::new("Ink", Blend::Xor, 42.0),
+                {
+                    let mut layer = Layer::new("Ink", Blend::Xor, 42.0);
+                    layer.brush = Brush::Marker;
+                    layer
+                },
                 Layer::new("Movement", Blend::Move, 100.0),
                 Layer::new("Atmosphere", Blend::Blur, 140.0),
             ],
@@ -676,6 +716,8 @@ impl Document {
                     || t.start < 0.0
                     || !t.bpm.is_finite()
                     || t.bpm <= 0.0
+                    || !t.division.is_finite()
+                    || t.division <= 0.0
                     || t.bars == 0
                     || t.beats == 0
                     || t.bars > 32
@@ -686,8 +728,6 @@ impl Document {
                 .tempos
                 .windows(2)
                 .any(|t| t[0].start >= t[1].start)
-            || !self.timing.step.is_finite()
-            || self.timing.step <= 0.0
             || !self.timing.duration.is_finite()
             || self.timing.duration <= 0.0
         {
@@ -907,19 +947,20 @@ mod tests {
         let t = Timing {
             tempos: vec![
                 Tempo {
+                    division: 8.0,
                     bars: 2,
                     beats: 4,
                     start: 0.0,
                     bpm: 120.0,
                 },
                 Tempo {
+                    division: 8.0,
                     bars: 2,
                     beats: 4,
                     start: 1.03,
                     bpm: 90.0,
                 },
             ],
-            step: 0.125,
             duration: 8.0,
         };
         assert!((t.next(1.0) - 1.03).abs() < 1e-9);
@@ -1055,7 +1096,7 @@ mod rhythm_and_exposure_tests {
         for (t, x) in [(0.0, 1.0), (0.0625, 2.0), (0.125, 3.0), (0.1875, 4.0)] {
             doc.layers[0].cels.insert(tick(t), cel(x));
         }
-        doc.timing.step = 1.0;
+        doc.timing.tempos[0].division = 1.0;
         doc.snap_exposures();
         let times: Vec<_> = doc.layers[0].cels.keys().map(|t| seconds(*t)).collect();
         assert_eq!(times, [0.0, 0.5, 1.0, 1.5]);
@@ -1078,12 +1119,15 @@ mod rhythm_and_exposure_tests {
             doc.layers[0].cels.insert(tick(t), cel(t as f32));
         }
         doc.timing.tempos.push(Tempo {
+            division: 8.0,
             start: 0.9,
             bpm: 85.0,
             bars: 3,
             beats: 3,
         });
-        doc.timing.step = 0.5;
+        for tempo in &mut doc.timing.tempos {
+            tempo.division = 2.0;
+        }
         doc.snap_exposures();
         assert_eq!(doc.layers[0].cels.len(), 4);
         for &t in doc.layers[0].cels.keys() {
@@ -1111,6 +1155,7 @@ mod rhythm_and_exposure_tests {
         assert_eq!(t.progress(3.999), 8);
         assert_eq!(t.progress(4.0), 1);
         let t = Tempo {
+            division: 8.0,
             start: 1.1,
             bpm: 60.0,
             bars: 3,
@@ -1186,5 +1231,61 @@ mod grouping_inheritance_tests {
             (90.0, 4, 3)
         );
         assert!(!timing.add_start(3.0));
+    }
+}
+
+#[cfg(test)]
+mod local_brush_and_division_tests {
+    use super::*;
+    #[test]
+    fn division_is_local_and_legacy_grid_is_preserved() {
+        let mut t = Timing::default();
+        t.add_start(1.0);
+        t.tempos[1].division = 4.0;
+        assert_eq!(t.next(0.0), 0.0625);
+        assert_eq!(t.next(1.0), 1.125);
+        assert_eq!(t.previous(1.0), 0.9375);
+        assert_eq!(t.snap(1.10), 1.125);
+        let saved = serde_json::to_value(&t).unwrap();
+        assert!(saved.get("step").is_none());
+        let restored: Timing = serde_json::from_value(saved).unwrap();
+        assert_eq!(t, restored);
+        let old: Timing = serde_json::from_str(
+            r#"{"tempos":[{"start":0.0,"bpm":120.0}],"step":0.25,"duration":8.0}"#,
+        )
+        .unwrap();
+        assert_eq!(old.tempos[0].division, 4.0);
+        assert_eq!(old.next(0.0), 0.125);
+        assert!(t.add_start(2.0));
+        assert_eq!(t.tempos[2].division, 4.0);
+    }
+    #[test]
+    fn layers_keep_their_selected_brush_and_new_second_layer_is_marker() {
+        let mut doc = Document::default();
+        assert_eq!(doc.layers[1].brush, Brush::Marker);
+        doc.layers[0].brush = Brush::Fill;
+        doc.layers[2].brush = Brush::Eraser;
+        let saved = serde_json::to_value(&doc).unwrap();
+        let restored: Document = serde_json::from_value(saved).unwrap();
+        assert_eq!(restored.layers[0].brush, Brush::Fill);
+        assert_eq!(restored.layers[1].brush, Brush::Marker);
+        assert_eq!(restored.layers[2].brush, Brush::Eraser);
+    }
+    #[test]
+    fn erasing_the_last_stroke_removes_the_frame_and_holds_the_prior_frame() {
+        let point = Point {
+            x: 0.0,
+            y: 0.0,
+            pressure: 1.0,
+            angle: 0.0,
+        };
+        let mut layer = Layer::new("Ink", Blend::Xor, 42.0);
+        let prior = Arc::new(Stroke::new(42.0, point));
+        let current = Arc::new(Stroke::new(42.0, Point { x: 100.0, ..point }));
+        layer.begin_edit(0, false).strokes.push(prior.clone());
+        layer.begin_edit(10, false).strokes.push(current.clone());
+        layer.erase_at(10, &std::collections::HashSet::from([current.id]));
+        assert!(!layer.cels.contains_key(&10));
+        assert_eq!(layer.held(10).unwrap().strokes[0].id, prior.id);
     }
 }

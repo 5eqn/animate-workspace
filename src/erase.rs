@@ -95,11 +95,17 @@ impl Node {
 pub struct EraserIndex {
     root: Option<Node>,
     erased: HashSet<u64>,
+    fills: HashSet<u64>,
 }
 impl EraserIndex {
     pub fn new(cel: &Cel) -> Self {
         let mut triangles = Vec::new();
+        let mut fills = HashSet::new();
         for stroke in &cel.strokes {
+            if stroke.brush == crate::model::Brush::Fill {
+                fills.insert(stroke.id);
+                continue;
+            }
             for t in render::hit_geometry(stroke).as_chunks::<12>().0 {
                 let vertices = [[t[0], t[1]], [t[4], t[5]], [t[8], t[9]]];
                 if cross(vertices[0], vertices[1], vertices[2]).abs() > f32::EPSILON {
@@ -114,12 +120,14 @@ impl EraserIndex {
         Self {
             root: Node::build(triangles),
             erased: HashSet::new(),
+            fills,
         }
     }
     pub fn sweep(&mut self, from: Point, to: Point, radius: f32) -> HashSet<u64> {
         let sweep = Sweep::new(from, to, radius);
         let mut hits = HashSet::new();
         if sweep.radii[0].max(sweep.radii[1]) > 0.0 {
+            hits.extend(self.fills.difference(&self.erased).copied());
             if let Some(root) = &self.root {
                 root.hits(&sweep, &self.erased, &mut hits);
             }
@@ -262,6 +270,20 @@ mod tests {
             pressure: 1.0,
             angle: 0.0,
         }
+    }
+    #[test]
+    fn fill_is_hit_anywhere_and_removed_as_one_stroke() {
+        let mut fill = Stroke::new(42.0, p(0.0, 0.0));
+        fill.brush = Brush::Fill;
+        let cel = Cel {
+            strokes: vec![Arc::new(fill)],
+        };
+        let mut index = EraserIndex::new(&cel);
+        assert_eq!(
+            index.sweep(p(1900.0, 700.0), p(1900.0, 700.0), 1.0).len(),
+            1
+        );
+        assert!(index.sweep(p(10.0, 10.0), p(10.0, 10.0), 1.0).is_empty());
     }
     #[test]
     fn fast_pressure_changes_do_not_erase_beside_the_light_end() {

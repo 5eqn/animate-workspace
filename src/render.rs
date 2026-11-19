@@ -30,6 +30,8 @@ pub struct Renderer {
     targets: Vec<Target>,
     msaa: Option<(glow::Framebuffer, glow::Renderbuffer)>,
     size: [i32; 2],
+    crop: [f32; 4],
+    output_size: [i32; 2],
     meshes: HashMap<u64, Mesh>,
     frame: u64,
 }
@@ -256,6 +258,8 @@ impl Renderer {
             targets: Vec::new(),
             msaa: None,
             size: [0, 0],
+            crop: [0.0, 0.0, 1.0, 1.0],
+            output_size: [0, 0],
             meshes: HashMap::new(),
             frame: 0,
         })
@@ -447,6 +451,61 @@ impl Renderer {
         scene: &Scene,
         size: [i32; 2],
     ) -> Result<usize, String> {
+        let output_size = size;
+        let height = 1920.0 / scene.aspect;
+        let mut padding = [0.0_f32; 2];
+        for layer in &scene.layers {
+            if layer.blend == crate::model::Blend::Move {
+                for stroke in &layer.cel.strokes {
+                    let motion = stroke.motion();
+                    for axis in 0..2 {
+                        padding[axis] += motion[axis].abs() * layer.strength.abs() * 1.06;
+                    }
+                }
+            } else if layer.blend == crate::model::Blend::Blur {
+                let radius = layer
+                    .cel
+                    .strokes
+                    .iter()
+                    .map(|s| s.width * 0.5)
+                    .fold(0.0_f32, f32::max)
+                    * layer.strength.abs()
+                    * 0.62;
+                for value in &mut padding {
+                    *value += radius;
+                }
+            }
+        }
+        let mut pixels = [
+            (padding[0] * size[0] as f32 / 1920.0).ceil() as i32,
+            (padding[1] * size[1] as f32 / height).ceil() as i32,
+        ];
+        // Keep capacity during live gestures; grow in small blocks without
+        // changing output resolution or alignment. Ghosts share the same targets.
+        for axis in 0..2 {
+            if pixels[axis] > 0 {
+                pixels[axis] = ((pixels[axis] + 31) / 32) * 32;
+            }
+            if self.output_size == output_size {
+                pixels[axis] = pixels[axis].max((self.size[axis] - output_size[axis]) / 2);
+            }
+        }
+        self.output_size = output_size;
+        let size = [size[0] + 2 * pixels[0], size[1] + 2 * pixels[1]];
+        let origin = [
+            -pixels[0] as f32 * 1920.0 / output_size[0] as f32,
+            -pixels[1] as f32 * height / output_size[1] as f32,
+        ];
+        let extent = [
+            size[0] as f32 * 1920.0 / output_size[0] as f32,
+            size[1] as f32 * height / output_size[1] as f32,
+        ];
+        self.crop = [
+            pixels[0] as f32 / size[0] as f32,
+            pixels[1] as f32 / size[1] as f32,
+            output_size[0] as f32 / size[0] as f32,
+            output_size[1] as f32 / size[1] as f32,
+        ];
         self.ensure_size(gl, size)?;
         gl.disable(glow::SCISSOR_TEST);
         gl.disable(glow::BLEND);
@@ -465,6 +524,12 @@ impl Renderer {
             Self::texture(gl, self.composite, "below", 0, self.targets[front].texture);
             Self::uniform_i(gl, self.composite, "mode", 6);
             gl.uniform_2_i32(
+                gl.get_uniform_location(self.composite, "pixel_origin")
+                    .as_ref(),
+                pixels[0],
+                pixels[1],
+            );
+            gl.uniform_2_i32(
                 gl.get_uniform_location(self.composite, "rhythm_grid")
                     .as_ref(),
                 rhythm.cols as i32,
@@ -474,8 +539,8 @@ impl Renderer {
             gl.uniform_2_i32(
                 gl.get_uniform_location(self.composite, "pixel_size")
                     .as_ref(),
-                size[0],
-                size[1],
+                output_size[0],
+                output_size[1],
             );
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
             front = next;
@@ -499,11 +564,27 @@ impl Renderer {
                 Self::uniform_i(gl, self.ink, "flow_mode", blur as i32);
                 gl.uniform_2_f32(
                     gl.get_uniform_location(self.ink, "canvas").as_ref(),
-                    1920.0,
-                    1920.0 / scene.aspect,
+                    extent[0],
+                    extent[1],
+                );
+                gl.uniform_2_f32(
+                    gl.get_uniform_location(self.ink, "origin").as_ref(),
+                    origin[0],
+                    origin[1],
                 );
                 for stroke in &layer.cel.strokes {
-                    self.mesh(gl, stroke);
+                    if stroke.brush == Brush::Fill {
+                        let flow = direction(stroke, stroke.points.len() - 1);
+                        gl.clear_color(
+                            if blur { flow[0] } else { 0.0 },
+                            if blur { flow[1] } else { 0.0 },
+                            0.0,
+                            1.0,
+                        );
+                        gl.clear(glow::COLOR_BUFFER_BIT);
+                    } else {
+                        self.mesh(gl, stroke);
+                    }
                 }
                 gl.disable_vertex_attrib_array(0);
                 gl.disable_vertex_attrib_array(1);
@@ -549,13 +630,13 @@ impl Renderer {
                 Self::uniform_f(gl, self.composite, "strength", layer.strength);
                 gl.uniform_2_f32(
                     gl.get_uniform_location(self.composite, "canvas").as_ref(),
-                    1920.0,
-                    1920.0 / scene.aspect,
+                    extent[0],
+                    extent[1],
                 );
                 gl.uniform_2_f32(
                     gl.get_uniform_location(self.composite, "motion").as_ref(),
-                    motion[0] / 1920.0,
-                    -motion[1] / (1920.0 / scene.aspect),
+                    motion[0] / extent[0],
+                    -motion[1] / extent[1],
                 );
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
                 front = next;
@@ -572,6 +653,13 @@ impl Renderer {
     ) {
         gl.use_program(Some(self.display));
         Self::texture(gl, self.display, "image", 0, self.targets[index].texture);
+        gl.uniform_4_f32(
+            gl.get_uniform_location(self.display, "crop").as_ref(),
+            self.crop[0],
+            self.crop[1],
+            self.crop[2],
+            self.crop[3],
+        );
         Self::uniform_i(gl, self.display, "mirror", mirror as i32);
         Self::uniform_i(gl, self.display, "tinting", tint.is_some() as i32);
         if let Some((color, alpha)) = tint {
@@ -672,8 +760,8 @@ impl Renderer {
             let mut pixels = vec![0; size[0] as usize * size[1] as usize * 4];
             gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
             gl.read_pixels(
-                0,
-                0,
+                (self.size[0] - size[0]) / 2,
+                (self.size[1] - size[1]) / 2,
                 size[0],
                 size[1],
                 glow::RGBA,
@@ -746,8 +834,8 @@ impl Renderer {
         let sample = |x: i32, y: i32| {
             let mut bytes = [0_u8; 16];
             gl.read_pixels(
-                x,
-                191 - y,
+                x + (self.size[0] - 384) / 2,
+                191 - y + (self.size[1] - 192) / 2,
                 1,
                 1,
                 glow::RGBA,
