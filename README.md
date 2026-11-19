@@ -92,6 +92,8 @@ Linux file dialogs use your desktop's XDG Desktop Portal backend. On Windows, us
 
 ## Development
 
+Vector strokes remain the source data. The GPU retains rendered layers and visible frames, updates damaged regions during drawing, and reuses the composed onion-skin image when only the cursor moves. Rendering keeps the original resolution, sampling and antialiasing.
+
 ```sh
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings

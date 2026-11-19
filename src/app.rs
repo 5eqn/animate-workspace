@@ -1157,6 +1157,8 @@ impl Studio {
             std::fs::create_dir_all(&directory).unwrap();
             let mut renderer = self.renderer.lock().unwrap();
             let mut outputs = Vec::new();
+            outputs.push(unsafe { renderer.verify_retained_rasters(gl) });
+
             let mut fill = Document::default();
             fill.settings.watermark = false;
             fill.layers.truncate(1);

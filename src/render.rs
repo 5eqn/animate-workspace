@@ -1,4 +1,7 @@
 use crate::model::{marker_corners, Brush, Scene, Stroke};
+mod cache;
+mod verification;
+use cache::{Bounds, RasterState, SceneKey};
 use eframe::{
     egui,
     glow::{self, HasContext},
@@ -8,9 +11,35 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[derive(Clone, Copy)]
 struct Target {
     texture: glow::Texture,
     framebuffer: glow::Framebuffer,
+}
+struct LayerRaster {
+    target: Target,
+    state: RasterState,
+}
+struct SceneRaster {
+    target: Target,
+    key: SceneKey,
+}
+#[derive(PartialEq)]
+struct ViewKey {
+    scene: SceneKey,
+    ghosts: Vec<(SceneKey, [u8; 3], u32)>,
+}
+impl ViewKey {
+    fn new(view: &View) -> Self {
+        Self {
+            scene: SceneKey::new(&view.scene),
+            ghosts: view
+                .ghosts
+                .iter()
+                .map(|g| (SceneKey::new(&g.scene), g.color, g.opacity.to_bits()))
+                .collect(),
+        }
+    }
 }
 struct Mesh {
     buffer: glow::Buffer,
@@ -22,6 +51,13 @@ struct Mesh {
     point_offsets: Vec<usize>,
     last_used: u64,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RenderWork {
+    stroke_draws: u64,
+    raster_pixels: u64,
+    scene_builds: u64,
+    view_builds: u64,
+}
 pub struct Renderer {
     ink: glow::Program,
     composite: glow::Program,
@@ -32,6 +68,11 @@ pub struct Renderer {
     size: [i32; 2],
     meshes: HashMap<u64, Mesh>,
     frame: u64,
+    layer_rasters: HashMap<usize, LayerRaster>,
+    scene_rasters: Vec<SceneRaster>,
+    visible_scenes: Vec<SceneKey>,
+    composed_view: Option<(ViewKey, Target)>,
+    work: RenderWork,
 }
 #[derive(Clone)]
 pub struct Ghost {
@@ -258,12 +299,18 @@ impl Renderer {
             size: [0, 0],
             meshes: HashMap::new(),
             frame: 0,
+            layer_rasters: HashMap::new(),
+            scene_rasters: Vec::new(),
+            visible_scenes: Vec::new(),
+            composed_view: None,
+            work: RenderWork::default(),
         })
     }
     unsafe fn ensure_size(&mut self, gl: &glow::Context, size: [i32; 2]) -> Result<(), String> {
         if self.size == size {
             return Ok(());
         }
+        self.clear_rasters(gl);
         for target in self.targets.drain(..) {
             gl.delete_texture(target.texture);
             gl.delete_framebuffer(target.framebuffer);
@@ -294,7 +341,7 @@ impl Renderer {
             return Err("GPU multisample target is incomplete".into());
         }
         self.msaa = Some((fbo, rbo));
-        for _ in 0..3 {
+        for _ in 0..2 {
             let texture = gl.create_texture()?;
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
             gl.tex_image_2d(
@@ -347,6 +394,116 @@ impl Renderer {
         }
         Ok(())
     }
+    unsafe fn new_raster(&self, gl: &glow::Context) -> Result<Target, String> {
+        self.new_raster_format(gl, glow::RGBA16F)
+    }
+    unsafe fn new_raster_format(&self, gl: &glow::Context, format: u32) -> Result<Target, String> {
+        let texture = gl.create_texture()?;
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            format as i32,
+            self.size[0],
+            self.size[1],
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(None),
+        );
+        for parameter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+            gl.tex_parameter_i32(glow::TEXTURE_2D, parameter, glow::LINEAR as i32);
+        }
+        for parameter in [glow::TEXTURE_WRAP_S, glow::TEXTURE_WRAP_T] {
+            gl.tex_parameter_i32(glow::TEXTURE_2D, parameter, glow::CLAMP_TO_EDGE as i32);
+        }
+        let framebuffer = gl.create_framebuffer()?;
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+        gl.framebuffer_texture_2d(
+            glow::FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            glow::TEXTURE_2D,
+            Some(texture),
+            0,
+        );
+        if gl.check_framebuffer_status(glow::FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
+            gl.delete_framebuffer(framebuffer);
+            gl.delete_texture(texture);
+            return Err("GPU raster cache framebuffer is incomplete".into());
+        }
+        Ok(Target {
+            texture,
+            framebuffer,
+        })
+    }
+    unsafe fn delete_raster(gl: &glow::Context, target: Target) {
+        gl.delete_texture(target.texture);
+        gl.delete_framebuffer(target.framebuffer);
+    }
+    unsafe fn clear_rasters(&mut self, gl: &glow::Context) {
+        if let Some((_, target)) = self.composed_view.take() {
+            Self::delete_raster(gl, target);
+        }
+        for (_, raster) in self.layer_rasters.drain() {
+            Self::delete_raster(gl, raster.target);
+        }
+        for raster in self.scene_rasters.drain(..) {
+            Self::delete_raster(gl, raster.target);
+        }
+    }
+    unsafe fn prune_scenes(&mut self, gl: &glow::Context) {
+        self.scene_rasters.retain(|raster| {
+            if self.visible_scenes.contains(&raster.key) {
+                true
+            } else {
+                Self::delete_raster(gl, raster.target);
+                false
+            }
+        });
+    }
+    unsafe fn scene(
+        &mut self,
+        gl: &glow::Context,
+        scene: &Scene,
+        size: [i32; 2],
+    ) -> Result<Target, String> {
+        self.ensure_size(gl, size)?;
+        gl.bind_vertex_array(Some(self.vao));
+        let key = SceneKey::new(scene);
+        if let Some(cached) = self.scene_rasters.iter().find(|cached| cached.key == key) {
+            return Ok(cached.target);
+        }
+        let rendered = self.render_scene(gl, scene, size)?;
+        let target = if let Some(index) = self
+            .scene_rasters
+            .iter()
+            .position(|old| !self.visible_scenes.contains(&old.key))
+        {
+            self.scene_rasters.swap_remove(index).target
+        } else {
+            self.new_raster(gl)?
+        };
+        gl.disable(glow::SCISSOR_TEST);
+        gl.bind_framebuffer(
+            glow::READ_FRAMEBUFFER,
+            Some(self.targets[rendered].framebuffer),
+        );
+        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(target.framebuffer));
+        gl.blit_framebuffer(
+            0,
+            0,
+            size[0],
+            size[1],
+            0,
+            0,
+            size[0],
+            size[1],
+            glow::COLOR_BUFFER_BIT,
+            glow::NEAREST,
+        );
+        self.scene_rasters.push(SceneRaster { key, target });
+        Ok(target)
+    }
     unsafe fn uniform_i(gl: &glow::Context, p: glow::Program, key: &str, v: i32) {
         gl.uniform_1_i32(gl.get_uniform_location(p, key).as_ref(), v);
     }
@@ -365,6 +522,7 @@ impl Renderer {
         Self::uniform_i(gl, p, key, slot as i32);
     }
     unsafe fn mesh(&mut self, gl: &glow::Context, stroke: &Stroke) {
+        self.work.stroke_draws += 1;
         let mesh = self.meshes.entry(stroke.id).or_insert_with(|| Mesh {
             buffer: gl.create_buffer().unwrap(),
             count: 0,
@@ -441,12 +599,13 @@ impl Renderer {
         gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, 16, 8);
         gl.draw_arrays(glow::TRIANGLES, 0, (mesh.count / 4) as i32);
     }
-    unsafe fn scene(
+    unsafe fn render_scene(
         &mut self,
         gl: &glow::Context,
         scene: &Scene,
         size: [i32; 2],
     ) -> Result<usize, String> {
+        self.work.scene_builds += 1;
         self.ensure_size(gl, size)?;
         gl.disable(glow::SCISSOR_TEST);
         gl.disable(glow::BLEND);
@@ -480,58 +639,91 @@ impl Renderer {
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
             front = next;
         }
-        for layer in &scene.layers {
+        self.layer_rasters.retain(|&index, raster| {
+            if index < scene.layers.len() {
+                true
+            } else {
+                Self::delete_raster(gl, raster.target);
+                false
+            }
+        });
+        for (layer_index, layer) in scene.layers.iter().enumerate() {
             if layer.blend.effect() && layer.cel.strokes.is_empty() {
                 continue;
             }
             if layer.blend != crate::model::Blend::Move {
                 let blur = layer.blend == crate::model::Blend::Blur;
-                // Blur is one vector field for the whole layer. Local tangents and pressure
-                // are interpolated by the GPU; unrelated pixels never run the blur kernel.
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.msaa.unwrap().0));
-                if blur {
-                    gl.clear_color(0.0, 0.0, 0.0, 0.0);
+                let mut raster = if let Some(raster) = self.layer_rasters.remove(&layer_index) {
+                    raster
                 } else {
-                    gl.clear_color(1.0, 1.0, 1.0, 1.0);
-                }
-                gl.clear(glow::COLOR_BUFFER_BIT);
-                gl.use_program(Some(self.ink));
-                Self::uniform_i(gl, self.ink, "flow_mode", blur as i32);
-                gl.uniform_2_f32(
-                    gl.get_uniform_location(self.ink, "canvas").as_ref(),
-                    1920.0,
-                    1920.0 / scene.aspect,
-                );
-                for stroke in &layer.cel.strokes {
-                    if stroke.brush == Brush::Fill {
-                        let flow = direction(stroke, stroke.points.len() - 1);
-                        gl.clear_color(
-                            if blur { flow[0] } else { 0.0 },
-                            if blur { flow[1] } else { 0.0 },
-                            0.0,
-                            1.0,
-                        );
+                    LayerRaster {
+                        target: self.new_raster(gl)?,
+                        state: RasterState::new(blur),
+                    }
+                };
+                let dirty = raster.state.update(&layer.cel, blur, scene.aspect);
+                if let Some(dirty) = dirty {
+                    if let Some([x, y, w, h]) = dirty.pixels(size, scene.aspect) {
+                        self.work.raster_pixels += (w as u64) * (h as u64);
+                        let redraw = Bounds::pixel_region([x, y, w, h], size, scene.aspect);
+                        gl.enable(glow::SCISSOR_TEST);
+                        gl.scissor(x, y, w, h);
+                        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.msaa.unwrap().0));
+                        if blur {
+                            gl.clear_color(0.0, 0.0, 0.0, 0.0);
+                        } else {
+                            gl.clear_color(1.0, 1.0, 1.0, 1.0);
+                        }
                         gl.clear(glow::COLOR_BUFFER_BIT);
-                    } else {
-                        self.mesh(gl, stroke);
+                        gl.use_program(Some(self.ink));
+                        Self::uniform_i(gl, self.ink, "flow_mode", blur as i32);
+                        gl.uniform_2_f32(
+                            gl.get_uniform_location(self.ink, "canvas").as_ref(),
+                            1920.0,
+                            1920.0 / scene.aspect,
+                        );
+                        // Rebuild only damaged pixels, including older marks underneath
+                        // an erased or reshaped tip. Unchanged pixels stay on the GPU.
+                        for (i, stroke) in layer.cel.strokes.iter().enumerate() {
+                            if !raster.state.strokes[i].bounds.intersects(redraw) {
+                                continue;
+                            }
+                            if stroke.brush == Brush::Fill {
+                                let flow = direction(stroke, stroke.points.len() - 1);
+                                gl.clear_color(
+                                    if blur { flow[0] } else { 0.0 },
+                                    if blur { flow[1] } else { 0.0 },
+                                    0.0,
+                                    1.0,
+                                );
+                                gl.clear(glow::COLOR_BUFFER_BIT);
+                            } else {
+                                self.mesh(gl, stroke);
+                            }
+                        }
+                        gl.disable_vertex_attrib_array(0);
+                        gl.disable_vertex_attrib_array(1);
+                        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.msaa.unwrap().0));
+                        gl.bind_framebuffer(
+                            glow::DRAW_FRAMEBUFFER,
+                            Some(raster.target.framebuffer),
+                        );
+                        gl.blit_framebuffer(
+                            x,
+                            y,
+                            x + w,
+                            y + h,
+                            x,
+                            y,
+                            x + w,
+                            y + h,
+                            glow::COLOR_BUFFER_BIT,
+                            glow::NEAREST,
+                        );
+                        gl.disable(glow::SCISSOR_TEST);
                     }
                 }
-                gl.disable_vertex_attrib_array(0);
-                gl.disable_vertex_attrib_array(1);
-                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.msaa.unwrap().0));
-                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.targets[2].framebuffer));
-                gl.blit_framebuffer(
-                    0,
-                    0,
-                    size[0],
-                    size[1],
-                    0,
-                    0,
-                    size[0],
-                    size[1],
-                    glow::COLOR_BUFFER_BIT,
-                    glow::NEAREST,
-                );
+                self.layer_rasters.insert(layer_index, raster);
             }
             let motions = if layer.blend == crate::model::Blend::Move {
                 layer
@@ -548,7 +740,15 @@ impl Renderer {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.targets[next].framebuffer));
                 gl.use_program(Some(self.composite));
                 Self::texture(gl, self.composite, "below", 0, self.targets[front].texture);
-                Self::texture(gl, self.composite, "ink", 1, self.targets[2].texture);
+                if layer.blend != crate::model::Blend::Move {
+                    Self::texture(
+                        gl,
+                        self.composite,
+                        "ink",
+                        1,
+                        self.layer_rasters[&layer_index].target.texture,
+                    );
+                }
                 Self::uniform_i(gl, self.composite, "mode", layer.blend.shader_id());
                 Self::uniform_i(gl, self.composite, "style", layer.style.id());
                 Self::uniform_i(
@@ -577,12 +777,12 @@ impl Renderer {
     unsafe fn show(
         &self,
         gl: &glow::Context,
-        index: usize,
+        texture: glow::Texture,
         mirror: bool,
         tint: Option<([u8; 3], f32)>,
     ) {
         gl.use_program(Some(self.display));
-        Self::texture(gl, self.display, "image", 0, self.targets[index].texture);
+        Self::texture(gl, self.display, "image", 0, texture);
         Self::uniform_i(gl, self.display, "mirror", mirror as i32);
         Self::uniform_i(gl, self.display, "tinting", tint.is_some() as i32);
         if let Some((color, alpha)) = tint {
@@ -608,7 +808,61 @@ impl Renderer {
         let vp = info.viewport_in_pixels();
         let clip = info.clip_rect_in_pixels();
         let size = [vp.width_px.max(1), vp.height_px.max(1)];
-        // The UI canvas owns this scissored region, including its white paper.
+        self.visible_scenes = std::iter::once(SceneKey::new(&view.scene))
+            .chain(view.ghosts.iter().map(|g| SceneKey::new(&g.scene)))
+            .collect();
+        let displayed = (|| -> Result<glow::Texture, String> {
+            self.ensure_size(gl, size)?;
+            if view.ghosts.is_empty() {
+                if let Some((_, target)) = self.composed_view.take() {
+                    Self::delete_raster(gl, target);
+                }
+                return Ok(self.scene(gl, &view.scene, size)?.texture);
+            }
+            let key = ViewKey::new(view);
+            if let Some((old, target)) = &self.composed_view {
+                if *old == key {
+                    return Ok(target.texture);
+                }
+            }
+            self.work.view_builds += 1;
+            let target = if let Some((_, target)) = self.composed_view.take() {
+                target
+            } else {
+                self.new_raster_format(gl, glow::RGBA8)?
+            };
+            gl.disable(glow::SCISSOR_TEST);
+            gl.disable(glow::BLEND);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.framebuffer));
+            gl.viewport(0, 0, size[0], size[1]);
+            gl.clear_color(1.0, 1.0, 1.0, 1.0);
+            gl.clear(glow::COLOR_BUFFER_BIT);
+            for ghost in &view.ghosts {
+                let rendered = self.scene(gl, &ghost.scene, size)?;
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.framebuffer));
+                gl.viewport(0, 0, size[0], size[1]);
+                gl.disable(glow::SCISSOR_TEST);
+                gl.enable(glow::BLEND);
+                gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+                self.show(
+                    gl,
+                    rendered.texture,
+                    false,
+                    Some((ghost.color, ghost.opacity)),
+                );
+            }
+            let rendered = self.scene(gl, &view.scene, size)?;
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.framebuffer));
+            gl.viewport(0, 0, size[0], size[1]);
+            gl.disable(glow::SCISSOR_TEST);
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::DST_COLOR, glow::ZERO);
+            self.show(gl, rendered.texture, false, None);
+            self.composed_view = Some((key, target));
+            Ok(target.texture)
+        })();
+        gl.bind_framebuffer(glow::FRAMEBUFFER, framebuffer);
+        gl.viewport(vp.left_px, vp.from_bottom_px, vp.width_px, vp.height_px);
         gl.enable(glow::SCISSOR_TEST);
         gl.scissor(
             clip.left_px,
@@ -616,38 +870,12 @@ impl Renderer {
             clip.width_px,
             clip.height_px,
         );
-        gl.bind_framebuffer(glow::FRAMEBUFFER, framebuffer);
-        gl.clear_color(1.0, 1.0, 1.0, 1.0);
-        gl.clear(glow::COLOR_BUFFER_BIT);
-        for ghost in &view.ghosts {
-            if let Ok(front) = self.scene(gl, &ghost.scene, size) {
-                gl.bind_framebuffer(glow::FRAMEBUFFER, framebuffer);
-                gl.viewport(vp.left_px, vp.from_bottom_px, vp.width_px, vp.height_px);
-                gl.enable(glow::SCISSOR_TEST);
-                gl.scissor(
-                    clip.left_px,
-                    clip.from_bottom_px,
-                    clip.width_px,
-                    clip.height_px,
-                );
-                gl.enable(glow::BLEND);
-                gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
-                self.show(gl, front, view.mirror, Some((ghost.color, ghost.opacity)));
-            }
-        }
-        if let Ok(front) = self.scene(gl, &view.scene, size) {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, framebuffer);
-            gl.viewport(vp.left_px, vp.from_bottom_px, vp.width_px, vp.height_px);
-            gl.enable(glow::SCISSOR_TEST);
-            gl.scissor(
-                clip.left_px,
-                clip.from_bottom_px,
-                clip.width_px,
-                clip.height_px,
-            );
-            gl.enable(glow::BLEND);
-            gl.blend_func(glow::DST_COLOR, glow::ZERO);
-            self.show(gl, front, view.mirror, None);
+        gl.disable(glow::BLEND);
+        gl.disable(glow::DEPTH_TEST);
+        gl.disable(glow::CULL_FACE);
+        gl.bind_vertex_array(Some(self.vao));
+        if let Ok(texture) = displayed {
+            self.show(gl, texture, view.mirror, None);
         }
         gl.blend_func_separate(
             glow::ONE,
@@ -655,6 +883,7 @@ impl Renderer {
             glow::ONE_MINUS_DST_ALPHA,
             glow::ONE,
         );
+        self.prune_scenes(gl);
         gl.active_texture(glow::TEXTURE0);
         gl.bind_vertex_array(None);
         if self.frame.is_multiple_of(120) {
@@ -677,9 +906,10 @@ impl Renderer {
         let framebuffer = gl.get_parameter_framebuffer(glow::FRAMEBUFFER_BINDING);
         let mut viewport = [0; 4];
         gl.get_parameter_i32_slice(glow::VIEWPORT, &mut viewport);
+        self.visible_scenes = vec![SceneKey::new(scene)];
         let result = (|| {
             let front = self.scene(gl, scene, size)?;
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.targets[front].framebuffer));
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(front.framebuffer));
             let mut pixels = vec![0; size[0] as usize * size[1] as usize * 4];
             gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
             gl.read_pixels(
@@ -693,6 +923,7 @@ impl Renderer {
             );
             Ok(pixels)
         })();
+        self.prune_scenes(gl);
         gl.bind_framebuffer(glow::FRAMEBUFFER, framebuffer);
         gl.viewport(viewport[0], viewport[1], viewport[2], viewport[3]);
         result
@@ -753,7 +984,10 @@ impl Renderer {
         );
         self.read_frame(gl, &document.scene(0), [384, 192]).unwrap();
         let framebuffer = gl.get_parameter_framebuffer(glow::FRAMEBUFFER_BINDING);
-        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.targets[2].framebuffer));
+        gl.bind_framebuffer(
+            glow::FRAMEBUFFER,
+            Some(self.layer_rasters[&3].target.framebuffer),
+        );
         let sample = |x: i32, y: i32| {
             let mut bytes = [0_u8; 16];
             gl.read_pixels(
@@ -786,6 +1020,7 @@ impl Renderer {
         gl.bind_framebuffer(glow::FRAMEBUFFER, framebuffer);
     }
     pub unsafe fn destroy(&mut self, gl: &glow::Context) {
+        self.clear_rasters(gl);
         for mesh in self.meshes.drain().map(|(_, m)| m) {
             gl.delete_buffer(mesh.buffer);
         }

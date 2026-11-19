@@ -92,6 +92,8 @@ Linux 文件对话框需要桌面环境的 XDG Desktop Portal 后端。Windows �
 
 ## 开发验证
 
+矢量笔迹始终是原始数据。GPU 保留已渲染的图层和可见帧，绘制时更新受影响区域；只移动光标时直接复用已合成的洋葱皮画面。分辨率、采样和抗锯齿保持原有设置。
+
 ```sh
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
