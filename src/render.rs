@@ -1,4 +1,6 @@
 use crate::model::{marker_corners, Brush, Scene, Stroke};
+#[allow(dead_code)]
+pub mod benchmark;
 mod cache;
 mod verification;
 use cache::{Bounds, RasterState, SceneKey};
@@ -19,6 +21,7 @@ struct Target {
 struct LayerRaster {
     target: Target,
     state: RasterState,
+    format: u32,
 }
 struct SceneRaster {
     target: Target,
@@ -64,7 +67,8 @@ pub struct Renderer {
     display: glow::Program,
     vao: glow::VertexArray,
     targets: Vec<Target>,
-    msaa: Option<(glow::Framebuffer, glow::Renderbuffer)>,
+    msaa: [Option<(glow::Framebuffer, glow::Renderbuffer)>; 2],
+    mask_format: u32,
     size: [i32; 2],
     meshes: HashMap<u64, Mesh>,
     frame: u64,
@@ -296,7 +300,8 @@ impl Renderer {
             display: program(gl, full, include_str!("../shaders/display.frag"))?,
             vao: gl.create_vertex_array()?,
             targets: Vec::new(),
-            msaa: None,
+            msaa: [None; 2],
+            mask_format: glow::R16F,
             size: [0, 0],
             meshes: HashMap::new(),
             frame: 0,
@@ -316,32 +321,13 @@ impl Renderer {
             gl.delete_texture(target.texture);
             gl.delete_framebuffer(target.framebuffer);
         }
-        if let Some((fbo, rbo)) = self.msaa.take() {
-            gl.delete_framebuffer(fbo);
-            gl.delete_renderbuffer(rbo);
+        for target in &mut self.msaa {
+            if let Some((fbo, rbo)) = target.take() {
+                gl.delete_framebuffer(fbo);
+                gl.delete_renderbuffer(rbo);
+            }
         }
         self.size = size;
-        let fbo = gl.create_framebuffer()?;
-        let rbo = gl.create_renderbuffer()?;
-        gl.bind_renderbuffer(glow::RENDERBUFFER, Some(rbo));
-        gl.renderbuffer_storage_multisample(
-            glow::RENDERBUFFER,
-            4.min(gl.get_parameter_i32(glow::MAX_SAMPLES)),
-            glow::RGBA16F,
-            size[0],
-            size[1],
-        );
-        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-        gl.framebuffer_renderbuffer(
-            glow::FRAMEBUFFER,
-            glow::COLOR_ATTACHMENT0,
-            glow::RENDERBUFFER,
-            Some(rbo),
-        );
-        if gl.check_framebuffer_status(glow::FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
-            return Err("GPU multisample target is incomplete".into());
-        }
-        self.msaa = Some((fbo, rbo));
         for _ in 0..2 {
             let texture = gl.create_texture()?;
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
@@ -394,6 +380,42 @@ impl Renderer {
             });
         }
         Ok(())
+    }
+    unsafe fn multisample(
+        &mut self,
+        gl: &glow::Context,
+        blur: bool,
+    ) -> Result<glow::Framebuffer, String> {
+        let index = usize::from(blur);
+        if let Some((framebuffer, _)) = self.msaa[index] {
+            return Ok(framebuffer);
+        }
+        let fbo = gl.create_framebuffer()?;
+        let rbo = gl.create_renderbuffer()?;
+        gl.bind_renderbuffer(glow::RENDERBUFFER, Some(rbo));
+        gl.renderbuffer_storage_multisample(
+            glow::RENDERBUFFER,
+            4.min(gl.get_parameter_i32(glow::MAX_SAMPLES)),
+            if blur {
+                glow::RGBA16F
+            } else {
+                self.mask_format
+            },
+            self.size[0],
+            self.size[1],
+        );
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+        gl.framebuffer_renderbuffer(
+            glow::FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            glow::RENDERBUFFER,
+            Some(rbo),
+        );
+        if gl.check_framebuffer_status(glow::FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
+            return Err("GPU multisample target is incomplete".into());
+        }
+        self.msaa[index] = Some((fbo, rbo));
+        Ok(fbo)
     }
     unsafe fn new_raster(&self, gl: &glow::Context) -> Result<Target, String> {
         self.new_raster_format(gl, glow::RGBA16F)
@@ -484,24 +506,9 @@ impl Renderer {
         } else {
             self.new_raster(gl)?
         };
-        gl.disable(glow::SCISSOR_TEST);
-        gl.bind_framebuffer(
-            glow::READ_FRAMEBUFFER,
-            Some(self.targets[rendered].framebuffer),
-        );
-        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(target.framebuffer));
-        gl.blit_framebuffer(
-            0,
-            0,
-            size[0],
-            size[1],
-            0,
-            0,
-            size[0],
-            size[1],
-            glow::COLOR_BUFFER_BIT,
-            glow::NEAREST,
-        );
+        // Retain the completed image itself. Give the compositor a spare
+        // target instead of copying an entire Retina canvas after every edit.
+        let target = std::mem::replace(&mut self.targets[rendered], target);
         self.scene_rasters.push(SceneRaster { key, target });
         Ok(target)
     }
@@ -669,22 +676,36 @@ impl Renderer {
             }
             if layer.blend != crate::model::Blend::Move {
                 let blur = layer.blend == crate::model::Blend::Blur;
-                let mut raster = if let Some(raster) = self.layer_rasters.remove(&layer_index) {
-                    raster
+                // Ordinary ink is monochrome. R16F retains the same coverage
+                // precision as RGBA16F while transferring one quarter the data.
+                let format = if blur {
+                    glow::RGBA16F
                 } else {
-                    LayerRaster {
-                        target: self.new_raster(gl)?,
-                        state: RasterState::new(blur),
+                    self.mask_format
+                };
+                let old = self.layer_rasters.remove(&layer_index);
+                let mut raster = match old {
+                    Some(raster) if raster.format == format => raster,
+                    old => {
+                        if let Some(raster) = old {
+                            Self::delete_raster(gl, raster.target);
+                        }
+                        LayerRaster {
+                            target: self.new_raster_format(gl, format)?,
+                            state: RasterState::new(blur),
+                            format,
+                        }
                     }
                 };
                 let dirty = raster.state.update(&layer.cel, blur, scene.aspect);
                 if let Some(dirty) = dirty {
                     if let Some([x, y, w, h]) = dirty.pixels(size, scene.aspect) {
+                        let msaa = self.multisample(gl, blur)?;
                         self.work.raster_pixels += (w as u64) * (h as u64);
                         let redraw = Bounds::pixel_region([x, y, w, h], size, scene.aspect);
                         gl.enable(glow::SCISSOR_TEST);
                         gl.scissor(x, y, w, h);
-                        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.msaa.unwrap().0));
+                        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(msaa));
                         if blur {
                             gl.clear_color(0.0, 0.0, 0.0, 0.0);
                         } else {
@@ -719,7 +740,7 @@ impl Renderer {
                         }
                         gl.disable_vertex_attrib_array(0);
                         gl.disable_vertex_attrib_array(1);
-                        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.msaa.unwrap().0));
+                        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(msaa));
                         gl.bind_framebuffer(
                             glow::DRAW_FRAMEBUFFER,
                             Some(raster.target.framebuffer),
@@ -1047,9 +1068,11 @@ impl Renderer {
             gl.delete_texture(t.texture);
             gl.delete_framebuffer(t.framebuffer);
         }
-        if let Some((fbo, rbo)) = self.msaa.take() {
-            gl.delete_framebuffer(fbo);
-            gl.delete_renderbuffer(rbo);
+        for target in &mut self.msaa {
+            if let Some((fbo, rbo)) = target.take() {
+                gl.delete_framebuffer(fbo);
+                gl.delete_renderbuffer(rbo);
+            }
         }
         for p in [self.ink, self.composite, self.display] {
             gl.delete_program(p);

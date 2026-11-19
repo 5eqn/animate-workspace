@@ -41,7 +41,7 @@ void main() {
     }
 
     vec3 a=paper(uv);
-    vec3 b=texture(ink,uv).rgb;
+    vec3 b=vec3(texture(ink,uv).r);
     if (inverted) b=1.0-b;
     vec2 d=motion*strength;
     if (mode==0) color=vec4(b,1.0);

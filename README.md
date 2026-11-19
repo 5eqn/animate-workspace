@@ -61,9 +61,11 @@ Open Settings from the macOS application menu or with Command / Ctrl + comma; **
 
 ![Language and settings management](docs/screenshots/general.png)
 
-The interface follows the system language, with English and Simplified Chinese available. **General** lets you choose a language, export or import your settings, or restore all defaults.
+The interface follows the system language, with English and Simplified Chinese available. **General** lets you choose a language and rendering frame rate, export or import your settings, or restore all defaults.
 
-Application preferences save automatically: language, shortcuts, brushes, onion skin, playback options, new-project defaults and video quality. Each project keeps its own drawings, selected brushes, layer sizes and order, beat grid, music, page shape and rhythm blocks. Opening a project or undoing a drawing keeps your application preferences.
+Rendering follows the current display by default. During interaction or playback, macOS schedules drawing from the system display clock; input samples keep their original positions, pressures and tilt. Static views stop redrawing. You can select a lower frame rate in General; this setting is separate from video export FPS.
+
+Application preferences save automatically: language, rendering frame rate, shortcuts, brushes, onion skin, playback options, new-project defaults and video quality. Each project keeps its own drawings, selected brushes, layer sizes and order, beat grid, music, page shape and rhythm blocks. Opening a project or undoing a drawing keeps your application preferences.
 
 **Picture offset** adjusts local music playback alignment. It defaults to **−64 ms**; negative values advance the picture and positive values delay it. It leaves the timing of exported video unchanged.
 
@@ -105,9 +107,11 @@ cargo build --release --locked
 
 Desktop tests in `scripts/ui-*-smoke.py` use Pillow, xdotool and a 1440 × 960 display. The audio-drop test also uses python3-xlib. Screenshots come from the running application. Tests can use `MORI_PREFERENCES_PATH` to keep settings separate.
 
-Run `./scripts/run.sh --debug-fps` for an on-screen diagnostic overlay: canvas paint FPS, application updates, pointer events and frame gaps. It observes the normal redraw cadence without requesting extra frames. Canvas FPS counts drawing callbacks, not physical display scanout.
+Run `./scripts/run.sh --debug-fps` for an on-screen diagnostic overlay: canvas paint FPS, target/display rates, native swap waiting, application updates, pointer events and frame gaps. It observes the normal redraw cadence without requesting extra frames. Canvas FPS counts drawing callbacks, not physical display scanout.
 
 For native frame pacing diagnosis, run `./scripts/run.sh --trace-frames` and move the pointer continuously. The terminal reports application update intervals, CPU submission time and GPU identity without forcing GPU synchronization.
+
+See [rendering and performance validation](docs/performance.md) for the scheduling integration, pixel-equivalence checks and reproducible GPU workloads.
 
 Validation runs locally on Linux, with Apple Silicon compilation checks for native macOS modules. Huion hardware, native menus and audio alignment still need testing on a Mac.
 

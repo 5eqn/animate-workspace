@@ -14,6 +14,7 @@ mod timing;
 
 fn main() -> eframe::Result {
     timing::initialize();
+    let pacing = std::sync::Arc::new(eframe::FramePacing::default());
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("MORI")
@@ -27,11 +28,12 @@ fn main() -> eframe::Result {
         renderer: eframe::Renderer::Glow,
         multisampling: 0,
         vsync: true,
+        frame_pacing: Some(pacing.clone()),
         ..Default::default()
     };
     eframe::run_native(
         "MORI",
         options,
-        Box::new(|cc| Ok(Box::new(app::Studio::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(app::Studio::new(cc, pacing)))),
     )
 }

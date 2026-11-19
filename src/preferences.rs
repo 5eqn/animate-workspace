@@ -63,6 +63,8 @@ impl PauseBehavior {
 #[serde(default)]
 pub struct Preferences {
     pub language: Language,
+    /// Zero follows the current display; positive values select a lower maximum.
+    pub frame_rate: u32,
     pub onion: Onion,
     pub pressure_gamma: f32,
     pub minimum_pressure: f32,
@@ -84,6 +86,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             language: Language::System,
+            frame_rate: 0,
             onion: Onion::default(),
             pressure_gamma: 1.0,
             minimum_pressure: 0.0,
@@ -370,6 +373,20 @@ fn config_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn frame_rate_is_a_global_preference_and_old_settings_follow_the_display() {
+        let mut old = serde_json::to_value(Preferences::default()).unwrap();
+        old.as_object_mut().unwrap().remove("frame_rate");
+        let mut preferences: Preferences = serde_json::from_value(old).unwrap();
+        assert_eq!(preferences.frame_rate, 0);
+        preferences.frame_rate = 30;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, _, _) = PreferenceStore::at(dir.path().join("preferences.json"));
+        store.save_if_changed(&preferences).unwrap();
+        assert_eq!(PreferenceStore::at(store.path).1.frame_rate, 30);
+        let project = serde_json::to_value(preferences.new_document()).unwrap();
+        assert!(!project.to_string().contains("frame_rate"));
+    }
     #[test]
     fn preferences_survive_restart_and_remain_outside_document_history() {
         let dir = tempfile::tempdir().unwrap();

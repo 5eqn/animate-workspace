@@ -2,6 +2,62 @@
 use super::*;
 
 impl Renderer {
+    pub unsafe fn verify_mask_precision(gl: &glow::Context) -> String {
+        use crate::model::*;
+        let mut doc = Document::default();
+        let make_stroke = |shift: f32| {
+            let mut stroke = Stroke::new(
+                230.0,
+                Point {
+                    x: 90.0,
+                    y: 160.0 + shift,
+                    pressure: 0.13,
+                    angle: 0.0,
+                },
+            );
+            for i in 1..48 {
+                stroke.points.push(Point {
+                    x: 90.0 + i as f32 * 36.0,
+                    y: 160.0 + shift + (i as f32 * 0.4).sin() * 70.0,
+                    pressure: 0.05 + (i as f32 * 0.6).sin().abs() * 0.95,
+                    angle: i as f32 * 0.1,
+                });
+            }
+            stroke
+        };
+        doc.layers[0]
+            .begin_edit(0, false)
+            .strokes
+            .push(Arc::new(make_stroke(0.0)));
+        let mut marker = make_stroke(220.0);
+        marker.brush = Brush::Marker;
+        doc.layers[1]
+            .begin_edit(0, false)
+            .strokes
+            .push(Arc::new(marker));
+        doc.layers[3]
+            .begin_edit(0, false)
+            .strokes
+            .push(Arc::new(make_stroke(70.0)));
+        let mut optimized = Self::new(gl).unwrap();
+        let mut reference = Self::new(gl).unwrap();
+        reference.mask_format = glow::RGBA16F;
+        for blend in [Blend::Xor, Blend::Darken, Blend::Lighten, Blend::Blur] {
+            doc.layers[1].blend = blend;
+            for style in Style::ALL {
+                doc.layers[3].style = style;
+                let actual = optimized.read_frame(gl, &doc.scene(0), [960, 402]).unwrap();
+                let expected = reference.read_frame(gl, &doc.scene(0), [960, 402]).unwrap();
+                assert_eq!(
+                    actual, expected,
+                    "Single-channel masks changed coverage or compositing"
+                );
+            }
+        }
+        optimized.destroy(gl);
+        reference.destroy(gl);
+        "R16F ink masks are pixel-identical to RGBA16F across blend modes, marker tilt, pressure, local blur and all blur styles".into()
+    }
     pub unsafe fn verify_sampler_bindings(&mut self, gl: &glow::Context) {
         use crate::model::*;
         let framebuffer = gl.get_parameter_framebuffer(glow::FRAMEBUFFER_BINDING);

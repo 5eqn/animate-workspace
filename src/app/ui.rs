@@ -388,6 +388,7 @@ impl Studio {
         ));
         let pos = ctx
             .input(|i| i.pointer.hover_pos())
+            .map(|pos| self.tablet.position().unwrap_or(pos))
             .filter(|p| paper.intersect(workspace).contains(*p));
         if let Some(pos) = pos.filter(|_| self.brush_wheel.is_none()) {
             ctx.set_cursor_icon(egui::CursorIcon::None);
@@ -1831,6 +1832,15 @@ impl Studio {
                                     ui.selectable_value(&mut self.preferences.language,Language::System,tr_ui(ui,"Follow system"));
                                     ui.selectable_value(&mut self.preferences.language,Language::English,"English");
                                     ui.selectable_value(&mut self.preferences.language,Language::Chinese,"简体中文");
+                                });
+                            });
+                            row(ui,"Frame rate",|ui|{
+                                let selected = if self.preferences.frame_rate == 0 { tr_ui(ui,"Follow display") } else { format!("{} FPS",self.preferences.frame_rate) };
+                                egui::ComboBox::from_id_salt("frame_rate").selected_text(selected).width(180.0).show_ui(ui,|ui|{
+                                    ui.selectable_value(&mut self.preferences.frame_rate,0,tr_ui(ui,"Follow display"));
+                                    for rate in [30,60,90,120,144,165,240] {
+                                        ui.selectable_value(&mut self.preferences.frame_rate,rate,format!("{rate} FPS"));
+                                    }
                                 });
                             });
                             ui.add_space(26.0);

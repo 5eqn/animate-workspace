@@ -9,7 +9,7 @@ use crate::{
     preferences::{PauseBehavior, PreferenceStore, Preferences},
     project,
     render::{self, Ghost, Renderer, View},
-    tablet::Tablet,
+    tablet::{self, PointerAction, Tablet},
 };
 use eframe::egui::{
     self, Align, Color32, FontId, Key, Layout, Pos2, Rect, RichText, Sense, Stroke as UiStroke,
@@ -77,6 +77,7 @@ pub struct Studio {
     dirty: bool,
     path: Option<PathBuf>,
     renderer: Arc<Mutex<Renderer>>,
+    pacing: Arc<eframe::FramePacing>,
     transport: Transport,
     play_origin: f64,
     play_timeline_start: f64,
@@ -113,9 +114,10 @@ fn text(ui: &mut egui::Ui, s: impl Into<String>, size: f32, color: Color32) {
     );
 }
 impl Studio {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, pacing: Arc<eframe::FramePacing>) -> Self {
         ui::configure(&cc.egui_ctx);
         let (preference_store, preferences, warning) = PreferenceStore::open();
+        pacing.set_max_fps(preferences.frame_rate);
         let system_locale = i18n::system_locale();
         i18n::use_language(&cc.egui_ctx, preferences.language, &system_locale);
         let renderer = Arc::new(Mutex::new(unsafe {
@@ -147,12 +149,13 @@ impl Studio {
             dirty: false,
             path: None,
             renderer,
+            pacing,
             transport: Transport::default(),
             play_origin: 0.0,
             play_timeline_start: 0.0,
             play_timeline_zoom: 1.0,
             drawing: None,
-            tablet: Tablet::new(cc.egui_ctx.clone()),
+            tablet: Tablet::new(cc),
             audio_bytes: None,
             toast: None,
             error: None,
@@ -720,63 +723,55 @@ impl Studio {
             return;
         }
         let events = ctx.input(|i| i.events.clone());
-        let mut force = self.tablet.pressure().unwrap_or(1.0);
-        for event in events {
-            if let egui::Event::Touch {
-                force: Some(value), ..
-            } = event
-            {
-                force = value;
-            }
-            match event {
-                egui::Event::PointerButton {
-                    pos,
-                    button: egui::PointerButton::Primary,
-                    pressed: true,
-                    ..
-                } if visible.contains(pos) => {
-                    let point = self.canvas_point(pos, paper, force);
-                    self.start_stroke(point);
+        let native = self.tablet.take_samples();
+        let samples = native.unwrap_or_else(|| {
+            tablet::event_samples(
+                &events,
+                self.tablet.pressure().unwrap_or(1.0),
+                self.tablet.angle().unwrap_or(0.0),
+            )
+        });
+        crate::timing::input_samples(
+            samples
+                .iter()
+                .filter(|s| s.action == PointerAction::Move)
+                .count(),
+        );
+        for sample in samples {
+            let point = self.canvas_sample(sample.position, paper, sample.pressure, sample.angle);
+            match sample.action {
+                PointerAction::Down if visible.contains(sample.position) => {
+                    self.start_stroke(point)
                 }
-                egui::Event::PointerMoved(pos) if self.drawing.is_some() => {
-                    self.move_stroke(self.canvas_point(pos, paper, force));
-                }
-                egui::Event::PointerButton {
-                    pos,
-                    button: egui::PointerButton::Primary,
-                    pressed: false,
-                    ..
-                } if self.drawing.is_some() => {
-                    self.move_stroke(self.canvas_point(pos, paper, force));
+                PointerAction::Move if self.drawing.is_some() => self.move_stroke(point),
+                PointerAction::Up if self.drawing.is_some() => {
+                    self.move_stroke(point);
                     self.finish_stroke();
                 }
-                egui::Event::WindowFocused(false) | egui::Event::PointerGone => {
-                    self.finish_stroke()
-                }
+                PointerAction::Cancel => self.finish_stroke(),
                 _ => {}
             }
         }
-        if self.drawing.is_some() {
-            if let Some(pressure) = self.tablet.pressure() {
-                if let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) {
-                    self.move_stroke(self.canvas_point(pos, paper, pressure));
-                }
-            }
+        if events.iter().any(|event| {
+            matches!(
+                event,
+                egui::Event::WindowFocused(false) | egui::Event::PointerGone
+            )
+        }) {
+            self.finish_stroke();
         }
     }
-    fn canvas_point(&self, pos: Pos2, paper: Rect, pressure: f32) -> Point {
+    fn canvas_sample(&self, pos: Pos2, paper: Rect, pressure: f32, angle: f32) -> Point {
         let mut x = (pos.x - paper.left()) / paper.width() * 1920.0;
         if self.mirror {
             x = 1920.0 - x;
         }
         Point {
-            angle: self.tablet.angle().map_or(0.0, |a| {
-                if self.mirror {
-                    std::f32::consts::PI - a
-                } else {
-                    a
-                }
-            }),
+            angle: if self.mirror {
+                std::f32::consts::PI - angle
+            } else {
+                angle
+            },
             x,
             y: (pos.y - paper.top()) / paper.width() * 1920.0,
             pressure: pressure
@@ -1161,6 +1156,7 @@ impl Studio {
                 renderer.verify_sampler_bindings(gl);
             }
             outputs.push("All compositor samplers are complete and do not alias the output, including watermark-only and movement-only scenes".into());
+            outputs.push(unsafe { Renderer::verify_mask_precision(gl) });
             outputs.push(unsafe { renderer.verify_retained_rasters(gl) });
 
             let mut fill = Document::default();
@@ -1724,7 +1720,7 @@ impl Studio {
 }
 impl eframe::App for Studio {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        crate::timing::frame(ctx, frame);
+        crate::timing::frame(ctx, frame, &self.pacing);
         let language_at_frame_start = self.preferences.language;
         i18n::use_language(ctx, self.preferences.language, &self.system_locale);
         let chinese = self.preferences.language.chinese(&self.system_locale);
@@ -1789,6 +1785,7 @@ impl eframe::App for Studio {
                     }
                 });
             });
+        self.tablet.clear_samples();
         self.confirmation(ctx);
         if let Some(error) = self.error.take() {
             rfd::MessageDialog::new()
@@ -1827,6 +1824,12 @@ impl eframe::App for Studio {
                     }
                 }
             }
+        }
+        self.pacing.set_max_fps(self.preferences.frame_rate);
+        // Continue at display cadence during gestures. When input stops, the
+        // final repaint consumes its last samples and leaves the event loop idle.
+        if ctx.input(|i| i.focused && (i.pointer.is_moving() || i.pointer.any_down())) {
+            ctx.request_repaint();
         }
         crate::timing::overlay(ctx);
         if self.smoke.is_some() || self.smoke_finish.is_some() {

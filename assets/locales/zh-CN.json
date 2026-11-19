@@ -1,4 +1,5 @@
 {
+  "Follow display": "跟随显示器",
   "Settings":"设置", "Settings…":"设置…", "General":"通用", "Back":"返回",
   "Project":"工程", "Brushes":"笔刷", "Onion skin":"洋葱皮", "Playback":"播放", "Export":"导出", "Shortcuts":"快捷键", "Preferences":"偏好设置", "This project":"当前工程",
   "Name":"名称", "Aspect ratio":"画纸比例", "Duration":"时长", "Grid · beats":"格点 · 拍", "Grid":"格点", "New projects":"新建工程", "Default aspect ratio":"默认画纸比例", "Default grid · beats":"默认格点 · 拍", "Rhythm watermark":"节奏水印",

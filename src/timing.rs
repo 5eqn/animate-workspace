@@ -24,6 +24,10 @@ struct Trace {
     last_app_ms: f64,
     last_canvas_ms: f64,
     renderer: String,
+    refresh_hz: f64,
+    target_fps: f64,
+    swap_ms: f64,
+    display_clock: bool,
 }
 const WINDOW: Duration = Duration::from_secs(1);
 struct Meter {
@@ -31,6 +35,7 @@ struct Meter {
     updates: VecDeque<Instant>,
     paints: VecDeque<Instant>,
     moves: VecDeque<Instant>,
+    samples: VecDeque<Instant>,
 }
 impl Meter {
     fn new(now: Instant) -> Self {
@@ -39,10 +44,16 @@ impl Meter {
             updates: VecDeque::new(),
             paints: VecDeque::new(),
             moves: VecDeque::new(),
+            samples: VecDeque::new(),
         }
     }
     fn prune(&mut self, now: Instant) {
-        for samples in [&mut self.updates, &mut self.paints, &mut self.moves] {
+        for samples in [
+            &mut self.updates,
+            &mut self.paints,
+            &mut self.moves,
+            &mut self.samples,
+        ] {
             while samples
                 .front()
                 .is_some_and(|time| now.duration_since(*time) > WINDOW)
@@ -51,7 +62,7 @@ impl Meter {
             }
         }
     }
-    fn rates(&mut self, now: Instant) -> [f64; 3] {
+    fn rates(&mut self, now: Instant) -> [f64; 4] {
         self.prune(now);
         let seconds = now
             .duration_since(self.start)
@@ -62,6 +73,7 @@ impl Meter {
             self.paints.len() as f64 / seconds,
             self.updates.len() as f64 / seconds,
             self.moves.len() as f64 / seconds,
+            self.samples.len() as f64 / seconds,
         ]
     }
     fn gaps(&self) -> (f64, f64) {
@@ -102,6 +114,10 @@ pub fn initialize() {
             last_app_ms: 0.0,
             last_canvas_ms: 0.0,
             renderer: String::new(),
+            refresh_hz: 0.0,
+            target_fps: 0.0,
+            swap_ms: 0.0,
+            display_clock: false,
         }));
         if console {
             eprintln!("MORI frame tracing enabled: move the pen or mouse continuously while reproducing the issue. Gaps include idle time; CPU timings exclude swap/vsync waiting.");
@@ -114,12 +130,16 @@ fn mean(values: &[f64]) -> f64 {
 fn maximum(values: &[f64]) -> f64 {
     values.iter().copied().fold(0.0, f64::max)
 }
-pub fn frame(ctx: &eframe::egui::Context, frame: &eframe::Frame) {
+pub fn frame(ctx: &eframe::egui::Context, frame: &eframe::Frame, pacing: &eframe::FramePacing) {
     let Some(trace) = TRACE.get() else {
         return;
     };
     let mut trace = trace.lock().unwrap();
     let now = Instant::now();
+    trace.refresh_hz = pacing.refresh_rate();
+    trace.target_fps = pacing.target_fps();
+    trace.swap_ms = pacing.swap_ms();
+    trace.display_clock = pacing.display_clock_active();
     trace.meter.updates.push_back(now);
     trace.meter.prune(now);
     let (input_time, moves) = ctx.input(|i| {
@@ -161,6 +181,15 @@ pub fn frame(ctx: &eframe::egui::Context, frame: &eframe::Frame) {
         trace.canvas_cpu.clear();
         trace.events = 0;
         trace.start = now;
+    }
+}
+/// Count samples consumed by the drawing path separately from UI pointer events.
+pub fn input_samples(count: usize) {
+    if let Some(trace) = TRACE.get() {
+        let mut trace = trace.lock().unwrap();
+        let now = Instant::now();
+        trace.meter.samples.extend(std::iter::repeat_n(now, count));
+        trace.meter.prune(now);
     }
 }
 pub struct CanvasTimer(Instant);
@@ -218,7 +247,38 @@ pub fn overlay(ctx: &eframe::egui::Context) {
     }
     let rates = trace.meter.rates(Instant::now());
     let (p95, max) = trace.meter.gaps();
-    let text=format!("Canvas FPS {:5.1}\nUpdate {:5.1} Hz   Pointer {:5.1} Hz\nPaint gap p95/max {:5.2}/{:5.2} ms\nCPU app/draw {:5.2} ms   canvas {:5.2} ms\n{} × {} px  @ {:.2}×\n{}",rates[0],rates[1],rates[2],p95,max,trace.last_app_ms,trace.last_canvas_ms,trace.pixels[0],trace.pixels[1],trace.scale,trace.renderer);
+    let clock = if trace.display_clock {
+        "display"
+    } else {
+        "timer + vsync"
+    };
+    let text = format!(
+        concat!(
+            "Canvas FPS {:5.1}   target {:.2} / display {:.2} Hz\n",
+            "Clock {}   Swap {:.2} ms\n",
+            "Update {:5.1} Hz   UI pointer {:5.1} Hz\n",
+            "Canvas samples {:5.1} Hz\n",
+            "Paint gap p95/max {:5.2}/{:5.2} ms\n",
+            "CPU app/draw {:5.2} ms   canvas {:5.2} ms\n",
+            "{} × {} px  @ {:.2}×\n{}"
+        ),
+        rates[0],
+        trace.target_fps,
+        trace.refresh_hz,
+        clock,
+        trace.swap_ms,
+        rates[1],
+        rates[2],
+        rates[3],
+        p95,
+        max,
+        trace.last_app_ms,
+        trace.last_canvas_ms,
+        trace.pixels[0],
+        trace.pixels[1],
+        trace.scale,
+        trace.renderer,
+    );
     drop(trace);
     egui::Area::new(egui::Id::new("debug_fps"))
         .order(egui::Order::Debug)
@@ -260,8 +320,8 @@ mod tests {
         for i in 0..48 {
             meter.moves.push_back(start + Duration::from_millis(i * 20));
         }
-        assert_eq!(meter.rates(start + WINDOW), [60.0, 90.0, 48.0]);
+        assert_eq!(meter.rates(start + WINDOW), [60.0, 90.0, 48.0, 0.0]);
         assert_eq!(meter.gaps(), (16.0, 16.0));
-        assert_eq!(meter.rates(start + Duration::from_secs(3)), [0.0; 3]);
+        assert_eq!(meter.rates(start + Duration::from_secs(3)), [0.0; 4]);
     }
 }

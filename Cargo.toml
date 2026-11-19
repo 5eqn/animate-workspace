@@ -20,7 +20,12 @@ codegen-units = 1
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version="0.3",default-features=false,features=["std","NSEvent","block2","NSApplication","NSResponder","NSMenu","NSMenuItem"] }
+objc2-app-kit = { version="0.3",default-features=false,features=["std","NSEvent","block2","NSApplication","NSResponder","NSMenu","NSMenuItem","NSView","NSWindow"] }
 block2 = "0.6"
+raw-window-handle = "0.6"
 
 objc2-foundation = { version="0.3",default-features=false,features=["std","NSObject","NSString","NSArray","NSLocale"] }
+
+# Local eframe 0.31.1 integration: display-clock scheduling; no backend migration.
+[patch.crates-io]
+eframe = { path = "vendor/eframe" }
