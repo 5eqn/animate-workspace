@@ -37,7 +37,7 @@ with tempfile.TemporaryDirectory(prefix='mori-frame-') as temp:
         key('ctrl+z');assert ink(shot('frame-blank-undo'))==ink(original)
         key('ctrl+shift+z');assert ink(shot('frame-blank-redo'))==0
         key('shift+d');assert ink(shot('frame-copy-previous'))==ink(original)
-        xd('mousemove',720,480,'mousedown',3);time.sleep(.1);xd('mousemove',720,535);time.sleep(.1);xd('mouseup',3)
+        xd('mousemove',720,480,'mousedown',3);time.sleep(.1);xd('mousemove',744,530);time.sleep(.1);xd('mouseup',3)
         click(500,400);assert ink(shot('frame-erased-empty'))==0
         key('a');assert ink(shot('frame-source-unchanged'))==ink(original)
         key('d');assert ink(shot('frame-empty-kept'))==0

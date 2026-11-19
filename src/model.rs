@@ -91,6 +91,12 @@ impl Stroke {
         self.revision = next_revision();
         self.geometry_edits.push((previous, self.revision, point));
     }
+    /// A complete rewrite needs no earlier geometry journal: all cache branches
+    /// must rebuild from zero. Keep this bounded across repeated transforms.
+    pub fn invalidate_all(&mut self) {
+        self.geometry_edits.clear();
+        self.invalidate_from(0);
+    }
     /// Earliest changed point on this revision branch. Unknown/undo branches rebuild safely.
     pub fn changed_since(&self, revision: u64) -> usize {
         if revision == self.revision {
@@ -113,22 +119,42 @@ impl Stroke {
             .unwrap_or(0)
     }
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct Cel {
-    /// Shared translation keeps moving a drawing independent of its point count.
-    #[serde(default)]
-    pub translation: [f32; 2],
     pub strokes: Vec<Arc<Stroke>>,
 }
-impl Cel {
-    pub fn local_point(&self, mut point: Point) -> Point {
-        point.x -= self.translation[0];
-        point.y -= self.translation[1];
-        point
+impl<'de> Deserialize<'de> for Cel {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Saved {
+            strokes: Vec<Arc<Stroke>>,
+            #[serde(default)]
+            translation: [f32; 2],
+        }
+        let saved = Saved::deserialize(deserializer)?;
+        if saved.translation.iter().any(|v| !v.is_finite()) {
+            return Err(serde::de::Error::custom("Invalid drawing translation"));
+        }
+        let mut cel = Self {
+            strokes: saved.strokes,
+        };
+        cel.translate(saved.translation);
+        Ok(cel)
     }
+}
+impl Cel {
     pub fn translate(&mut self, delta: [f32; 2]) {
-        self.translation[0] += delta[0];
-        self.translation[1] += delta[1];
+        if delta == [0.0; 2] {
+            return;
+        }
+        for stroke in &mut self.strokes {
+            let stroke = Arc::make_mut(stroke);
+            for point in &mut stroke.points {
+                point.x += delta[0];
+                point.y += delta[1];
+            }
+            stroke.invalidate_all();
+        }
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,6 +224,7 @@ pub enum Brush {
     Eraser,
     Fill,
     Move,
+    Scale,
 }
 fn default_eraser_width() -> f32 {
     42.0
@@ -250,7 +277,7 @@ impl Layer {
     }
     pub fn brush_width(&self, brush: Brush) -> f32 {
         match brush {
-            Brush::Ink | Brush::Fill | Brush::Move => self.width,
+            Brush::Ink | Brush::Fill | Brush::Move | Brush::Scale => self.width,
             Brush::Marker => self.marker_width,
             Brush::Liquify => self.liquify_width,
             Brush::Eraser => self.eraser_width,
@@ -258,7 +285,7 @@ impl Layer {
     }
     pub fn brush_width_mut(&mut self, brush: Brush) -> &mut f32 {
         match brush {
-            Brush::Ink | Brush::Fill | Brush::Move => &mut self.width,
+            Brush::Ink | Brush::Fill | Brush::Move | Brush::Scale => &mut self.width,
             Brush::Marker => &mut self.marker_width,
             Brush::Liquify => &mut self.liquify_width,
             Brush::Eraser => &mut self.eraser_width,
@@ -816,12 +843,9 @@ impl Document {
                 return Err("Invalid layer settings".into());
             }
             for c in l.cels.values() {
-                if c.translation.iter().any(|v| !v.is_finite()) {
-                    return Err("Invalid drawing translation".into());
-                }
                 for stroke in &c.strokes {
                     if !stroke.width.is_finite()
-                        || stroke.width <= 0.0
+                        || stroke.width < 0.0
                         || stroke.points.is_empty()
                         || stroke.points.iter().any(|p| {
                             !p.angle.is_finite()
@@ -1005,7 +1029,22 @@ mod tests {
         }
     }
     #[test]
-    fn moving_a_held_drawing_shares_vectors_and_preserves_history_and_other_layers() {
+    fn full_vector_rewrites_keep_geometry_history_bounded() {
+        let mut stroke = Stroke::new(20.0, p(10.0, 20.0));
+        let first = stroke.revision;
+        for _ in 0..1000 {
+            stroke.invalidate_all();
+        }
+        assert_eq!(stroke.geometry_edits.len(), 1);
+        assert_eq!(stroke.changed_since(first), 0);
+        let revision = stroke.revision;
+        stroke.points.push(p(30.0, 40.0));
+        stroke.invalidate_from(1);
+        assert_eq!(stroke.changed_since(revision), 1);
+        assert_eq!(stroke.changed_since(first), 0);
+    }
+    #[test]
+    fn moving_a_held_drawing_edits_vectors_and_preserves_history_and_other_layers() {
         let mut doc = Document::default();
         let mut stroke = Stroke::new(24.0, p(80.0, 120.0));
         stroke.points.push(p(140.0, 180.0));
@@ -1022,19 +1061,21 @@ mod tests {
         history.record(&doc);
         doc.layers[0].begin_edit(10, true).translate([70.0, -30.0]);
         let moved = &doc.layers[0].cels[&10];
-        assert_eq!(moved.translation, [70.0, -30.0]);
-        assert_eq!(moved.strokes.len(), 1);
-        assert!(Arc::ptr_eq(&moved.strokes[0], &stroke));
-        assert_eq!(moved.local_point(p(150.0, 90.0)), p(80.0, 120.0));
-        assert_eq!(doc.layers[0].cels[&0].translation, [0.0; 2]);
-        assert_eq!(doc.layers[1].cels[&0].translation, [0.0; 2]);
+        assert_eq!(moved.strokes[0].points[0], p(150.0, 90.0));
+        assert_eq!(moved.strokes[0].width, 24.0);
+        assert_eq!(doc.layers[0].cels[&0].strokes[0].points[0], p(80.0, 120.0));
+        assert_eq!(doc.layers[1].cels[&0].strokes[0].points[0], p(80.0, 120.0));
         let saved = serde_json::to_value(&doc).unwrap();
+        assert!(!saved.to_string().contains("translation"));
         let loaded: Document = serde_json::from_value(saved).unwrap();
-        assert_eq!(loaded.layers[0].cels[&10].translation, [70.0, -30.0]);
+        assert_eq!(
+            loaded.layers[0].cels[&10].strokes[0].points[0],
+            p(150.0, 90.0)
+        );
         assert!(history.undo(&mut doc));
         assert!(!doc.layers[0].cels.contains_key(&10));
         assert!(history.redo(&mut doc));
-        assert_eq!(doc.layers[0].cels[&10].translation, [70.0, -30.0]);
+        assert_eq!(doc.layers[0].cels[&10].strokes[0].points[0], p(150.0, 90.0));
     }
     #[test]
     fn variable_tempo_grid_crosses_anchors_both_ways() {
@@ -1173,7 +1214,6 @@ mod rhythm_and_exposure_tests {
     use super::*;
     fn cel(x: f32) -> Arc<Cel> {
         Arc::new(Cel {
-            translation: [0.0; 2],
             strokes: vec![Arc::new(Stroke::new(
                 10.0,
                 Point {
@@ -1391,7 +1431,6 @@ mod frame_edit_tests {
     use super::*;
     fn drawing(x: f32) -> Arc<Cel> {
         Arc::new(Cel {
-            translation: [0.0; 2],
             strokes: vec![Arc::new(Stroke::new(
                 10.0,
                 Point {

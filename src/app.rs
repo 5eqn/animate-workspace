@@ -10,6 +10,7 @@ use crate::{
     project,
     render::{self, Ghost, Renderer, View},
     tablet::{self, PointerAction, Tablet},
+    transform::{Gesture, ScaleTool, Similarity},
 };
 use eframe::egui::{
     self, Align, Color32, FontId, Key, Layout, Pos2, Rect, RichText, Sense, Stroke as UiStroke,
@@ -43,7 +44,7 @@ struct Drawing {
     last: Point,
     smoother: Option<StrokeSmoother>,
     liquify: bool,
-    movement: bool,
+    transform: Option<Gesture>,
     index: Option<SpatialIndex>,
     eraser: Option<EraserIndex>,
     recorded: bool,
@@ -102,6 +103,7 @@ pub struct Studio {
     allow_close: bool,
     fullscreen: bool,
     brush_wheel: Option<Pos2>,
+    scale_tool: ScaleTool,
     frame_drag: Option<(usize, Tick, Tick)>,
     smoke: Option<PathBuf>,
     smoke_finish: Option<PathBuf>,
@@ -174,6 +176,7 @@ impl Studio {
             allow_close: false,
             fullscreen: false,
             brush_wheel: None,
+            scale_tool: ScaleTool::default(),
             frame_drag: None,
             smoke,
             smoke_finish: None,
@@ -312,13 +315,24 @@ impl Studio {
             "Previous" => self.set_time(self.doc.timing.previous(self.time)),
             "Next" => self.set_time(self.doc.timing.next(self.time)),
             "Layer up" => {
-                self.layer = (self.layer + 1).min(self.doc.layers.len() - 1);
+                let next = (self.layer + 1).min(self.doc.layers.len() - 1);
+                if next != self.layer {
+                    self.scale_tool.reset();
+                }
+                self.layer = next;
             }
             "Layer down" => {
-                self.layer = self.layer.saturating_sub(1);
+                let next = self.layer.saturating_sub(1);
+                if next != self.layer {
+                    self.scale_tool.reset();
+                }
+                self.layer = next;
             }
             "Smaller" | "Larger" => {
-                if matches!(self.doc.layers[self.layer].brush, Brush::Fill | Brush::Move) {
+                if matches!(
+                    self.doc.layers[self.layer].brush,
+                    Brush::Fill | Brush::Move | Brush::Scale
+                ) {
                     return;
                 }
                 if self.drawing.as_ref().is_none_or(|d| !d.recorded) {
@@ -508,6 +522,7 @@ impl Studio {
     fn perform(&mut self, pending: Pending) {
         match pending {
             Pending::New => {
+                self.scale_tool.reset();
                 self.doc = self.preferences.new_document();
                 self.history = History::default();
                 self.path = None;
@@ -629,6 +644,7 @@ impl Studio {
                     Background::Loaded(path, doc, audio) => {
                         self.path = Some(path);
                         self.audio_bytes = doc.audio.as_ref().map(|a| a.bytes.clone());
+                        self.scale_tool.reset();
                         self.doc = *doc;
                         self.transport.stop();
                         self.transport.audio = audio;
@@ -747,6 +763,13 @@ impl Studio {
                 PointerAction::Move if self.drawing.is_some() => self.move_stroke(point),
                 PointerAction::Up if self.drawing.is_some() => {
                     self.move_stroke(point);
+                    if self
+                        .drawing
+                        .as_ref()
+                        .is_some_and(|d| matches!(d.transform, Some(Gesture::Center)))
+                    {
+                        self.scale_tool.center = Some(point);
+                    }
                     self.finish_stroke();
                 }
                 PointerAction::Cancel => self.finish_stroke(),
@@ -782,14 +805,27 @@ impl Studio {
         }
     }
     fn start_stroke(&mut self, point: Point) {
-        if self.doc.layers[self.layer].brush == Tool::Move {
+        let brush = self.doc.layers[self.layer].brush;
+        self.scale_tool.sync(self.layer, brush);
+        if matches!(brush, Brush::Move | Brush::Scale) {
+            let source = self.doc.layers[self.layer]
+                .held(tick(self.time))
+                .map_or_else(Cel::default, |cel| (**cel).clone());
+            let gesture = if brush == Brush::Move {
+                Gesture::Move {
+                    source,
+                    origin: point,
+                }
+            } else {
+                self.scale_tool.begin(point, source)
+            };
             self.drawing = Some(Drawing {
                 layer: self.layer,
                 time: tick(self.time),
                 last: point,
                 smoother: None,
                 liquify: false,
-                movement: true,
+                transform: Some(gesture),
                 index: None,
                 eraser: None,
                 recorded: false,
@@ -802,10 +838,10 @@ impl Studio {
             self.drawing = Some(Drawing {
                 layer: self.layer,
                 time: tick(self.time),
-                last: cel.map_or(point, |cel| cel.local_point(point)),
+                last: point,
                 smoother: None,
                 liquify: false,
-                movement: false,
+                transform: None,
                 index: None,
                 eraser: Some(index),
                 recorded: false,
@@ -820,7 +856,6 @@ impl Studio {
         let layer = self.layer;
         let width = self.doc.layers[layer].brush_width(self.doc.layers[self.layer].brush);
         let cel = self.doc.layers[layer].begin_edit(time, liquify);
-        let point = cel.local_point(point);
         let index = if liquify {
             Some(SpatialIndex::new(cel, width * 0.5))
         } else {
@@ -839,7 +874,7 @@ impl Studio {
                 None
             },
             liquify,
-            movement: false,
+            transform: None,
             index,
             eraser: None,
             recorded: true,
@@ -849,9 +884,6 @@ impl Studio {
         let Some(mut drawing) = self.drawing.take() else {
             return;
         };
-        let point = self.doc.layers[drawing.layer]
-            .held(drawing.time)
-            .map_or(point, |cel| cel.local_point(point));
         let width = self.doc.layers[drawing.layer].brush_width(Tool::Eraser);
         let hits = drawing
             .eraser
@@ -873,32 +905,30 @@ impl Studio {
             self.erase_segment(point);
             return;
         }
-        if self.drawing.as_ref().is_some_and(|d| d.movement) {
+        if self.drawing.as_ref().is_some_and(|d| d.transform.is_some()) {
             let mut drawing = self.drawing.take().unwrap();
-            let delta = [point.x - drawing.last.x, point.y - drawing.last.y];
-            if delta != [0.0; 2]
-                && self.doc.layers[drawing.layer]
-                    .held(drawing.time)
-                    .is_some_and(|cel| !cel.strokes.is_empty())
-            {
-                if !drawing.recorded {
-                    self.record();
-                    drawing.recorded = true;
+            if point.x != drawing.last.x || point.y != drawing.last.y {
+                if let Some((source, mapping)) = drawing.transform.as_ref().unwrap().mapping(point)
+                {
+                    if !source.strokes.is_empty()
+                        && (drawing.recorded || mapping != Similarity::IDENTITY)
+                    {
+                        if !drawing.recorded {
+                            self.record();
+                            drawing.recorded = true;
+                        }
+                        let cel = self.doc.layers[drawing.layer].begin_edit(drawing.time, true);
+                        mapping.apply(source, cel);
+                    }
                 }
-                self.doc.layers[drawing.layer]
-                    .begin_edit(drawing.time, true)
-                    .translate(delta);
+                drawing.last = point;
             }
-            drawing.last = point;
             self.drawing = Some(drawing);
             return;
         }
         let Some(drawing) = &mut self.drawing else {
             return;
         };
-        let point = self.doc.layers[drawing.layer]
-            .held(drawing.time)
-            .map_or(point, |cel| cel.local_point(point));
         let delta = [point.x - drawing.last.x, point.y - drawing.last.y];
         let distance = drawing.last.distance(point);
         if self.doc.layers[drawing.layer].brush == Tool::Fill {
@@ -1185,6 +1215,7 @@ impl Studio {
             outputs.push("All compositor samplers are complete and do not alias the output, including watermark-only scenes".into());
             outputs.push(unsafe { Renderer::verify_mask_precision(gl) });
             outputs.push(unsafe { renderer.verify_drawing_translation(gl) });
+            outputs.push(unsafe { renderer.verify_scale_rotation(gl) });
             outputs.push(unsafe { renderer.verify_retained_rasters(gl) });
 
             let mut fill = Document::default();
@@ -1239,7 +1270,6 @@ impl Studio {
                     layer.cels.insert(
                         0,
                         Arc::new(Cel {
-                            translation: [0.0; 2],
                             strokes: vec![Arc::new(stroke)],
                         }),
                     );
@@ -1325,7 +1355,6 @@ impl Studio {
             marker_doc.layers[0].cels.insert(
                 0,
                 Arc::new(Cel {
-                    translation: [0.0; 2],
                     strokes: vec![Arc::new(marker)],
                 }),
             );
@@ -1370,7 +1399,6 @@ impl Studio {
             marker_doc.layers[0].cels.insert(
                 0,
                 Arc::new(Cel {
-                    translation: [0.0; 2],
                     strokes: vec![Arc::new(marker)],
                 }),
             );
@@ -1424,7 +1452,6 @@ impl Studio {
             curve_doc.layers[0].cels.insert(
                 0,
                 Arc::new(Cel {
-                    translation: [0.0; 2],
                     strokes: vec![Arc::new(Stroke::new(12.0, first))],
                 }),
             );
@@ -1530,7 +1557,6 @@ impl Studio {
             local_doc.layers[2].cels.insert(
                 0,
                 Arc::new(Cel {
-                    translation: [0.0; 2],
                     strokes: vec![Arc::new(blur_stroke)],
                 }),
             );
@@ -1624,7 +1650,6 @@ impl Studio {
             pressure_doc.layers[0].cels.insert(
                 0,
                 Arc::new(Cel {
-                    translation: [0.0; 2],
                     strokes: vec![Arc::new(stroke)],
                 }),
             );
@@ -1782,6 +1807,8 @@ impl eframe::App for Studio {
                     }
                 });
             });
+        self.scale_tool
+            .sync(self.layer, self.doc.layers[self.layer].brush);
         self.tablet.clear_samples();
         self.confirmation(ctx);
         if let Some(error) = self.error.take() {

@@ -72,7 +72,7 @@ with tempfile.TemporaryDirectory(prefix='mori-erase-follow-') as temp:
         a, b = (440, 390, 660, 410), (790, 510, 1010, 530)
         assert ink(before, a) > 300 and ink(before, b) > 300
         key('d')  # The new time holds the earlier drawing.
-        brush(720, 535)  # Select Eraser on the six-tool wheel.
+        brush(744, 530)  # Select Eraser on the seven-tool wheel.
         drag((540, 350), (540, 450))  # Both endpoints miss; the sweep must hit.
         erased = shot('erase-held')
         assert ink(erased, a) == 0, 'A whole stroke was not erased by the sweep'

@@ -38,8 +38,14 @@ Upstream provenance, licenses and exact integration points are documented in
 - Ordinary black/white ink masks use R16F, including their four-sample render
   buffer. This retains the same coverage precision as RGBA16F with one quarter
   the channels. Colored composition and blur direction/coverage stay RGBA16F.
-- The Move brush updates a shared translation for the drawing. Stroke geometry
-  and pressure remain unchanged; rendering applies the translation on the GPU.
+- Move and Scale / Rotate edit the vector samples directly on the CPU, then
+  invalidate stroke geometry through the same revision path as liquify. Each
+  preview reads the gesture's initial drawing, keeping the center/grab stable
+  without composing event-by-event transforms. Scale also changes stroke width;
+  rotation changes the marker orientation. Pressure values remain unchanged.
+- Projects store final vector coordinates, with no retained transform chain.
+  Older saved translations are converted into vector coordinates on load.
+  Subsequent ink, liquify and erasing use ordinary canvas coordinates.
 - Multisample buffers are allocated only when their drawing path is used.
 - Completed scene textures are retained directly, avoiding a full-canvas copy
   after every edited frame.
@@ -66,7 +72,10 @@ MORI_PREFERENCES_PATH=/tmp/mori-smoke-preferences.json xvfb-run -a -s '-screen 0
 
 The pacing check exercises default 60 Hz and selected 30 FPS, verifies that
 pointer-event throughput exceeds rendering throughput, and checks idle CPU use.
-Other UI smoke scripts cover drawing, editing frames, erasing and playback.
+`scripts/ui-scale-brush-smoke.py` covers the two-step pivot interaction, repeated
+scaling and rotation, reset on brush/layer switches, held-frame isolation, undo
+and subsequent ink/erasing/liquify. Other UI smoke scripts cover moving, editing
+frames, erasing and playback.
 
 On Linux with an EGL-capable GPU, measure renderer work without window/vsync:
 
@@ -79,8 +88,9 @@ selects a real NVIDIA EGL device by default (`--vendor` selects another driver),
 and writes JSON with CPU and GPU p95/max times. Each workload has 15 warmup frames
 and 60 recorded frames. GPU times use driver timer queries; waiting for their
 results happens only in this offline script. Workloads cover blank and retained
-views, 1200-unit round/marker brushes, liquify, dense liquify, the Move brush, directional
-and chromatic blur, and six distinct onion drawings.
+views, 1200-unit round/marker brushes, liquify, dense liquify, Move,
+Scale / Rotate (also on the same 64,000-point drawing used for dense liquify),
+directional and chromatic blur, and six distinct onion drawings.
 
 For native interaction testing, use `./scripts/run.sh --debug-fps --trace-frames`.
 Canvas FPS counts drawing callbacks; it does not measure physical scanout.

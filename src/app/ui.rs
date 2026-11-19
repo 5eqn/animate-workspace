@@ -246,7 +246,7 @@ fn menu_row(ui: &mut egui::Ui, name: &str, control: impl FnOnce(&mut egui::Ui)) 
         control,
     );
 }
-fn wheel_directions() -> [(Brush, f32); 6] {
+fn wheel_directions() -> [(Brush, f32); 7] {
     std::array::from_fn(|i| {
         (
             [
@@ -256,8 +256,9 @@ fn wheel_directions() -> [(Brush, f32); 6] {
                 Brush::Eraser,
                 Brush::Liquify,
                 Brush::Move,
+                Brush::Scale,
             ][i],
-            -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::TAU / 6.0,
+            -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::TAU / 7.0,
         )
     })
 }
@@ -273,6 +274,27 @@ fn wheel_choice(center: Pos2, pos: Pos2) -> Option<Brush> {
 }
 fn brush_icon(p: &egui::Painter, c: Pos2, brush: Brush, color: Color32) {
     match brush {
+        Brush::Scale => {
+            p.rect_stroke(
+                Rect::from_center_size(c, Vec2::splat(15.0)),
+                1.0,
+                UiStroke::new(1.3_f32, color),
+                egui::StrokeKind::Inside,
+            );
+            let a = c - Vec2::splat(8.0);
+            let b = c + Vec2::splat(8.0);
+            p.line_segment([a, b], UiStroke::new(1.5_f32, color));
+            for (tip, sign) in [(a, -1.0), (b, 1.0)] {
+                p.line_segment(
+                    [tip, tip - Vec2::new(5.0 * sign, 0.0)],
+                    UiStroke::new(1.5_f32, color),
+                );
+                p.line_segment(
+                    [tip, tip - Vec2::new(0.0, 5.0 * sign)],
+                    UiStroke::new(1.5_f32, color),
+                );
+            }
+        }
         Brush::Move => {
             for axis in [Vec2::X, Vec2::Y] {
                 let side = Vec2::new(-axis.y, axis.x);
@@ -398,6 +420,8 @@ impl Studio {
             Vec2::new(width, width / self.doc.settings.aspect),
         );
         self.brush_picker(ctx, workspace);
+        self.scale_tool
+            .sync(self.layer, self.doc.layers[self.layer].brush);
         self.pointer_input(ctx, paper, paper.intersect(workspace));
         let painter = ui.painter().with_clip_rect(workspace);
         painter.add(render::callback(
@@ -405,6 +429,38 @@ impl Studio {
             self.renderer.clone(),
             self.view(true),
         ));
+        if self.doc.layers[self.layer].brush == Brush::Scale {
+            if let Some(center) = self.scale_tool.center {
+                let x = if self.mirror {
+                    1920.0 - center.x
+                } else {
+                    center.x
+                };
+                let center = paper.min + Vec2::new(x, center.y) * (width / 1920.0);
+                painter.circle_stroke(center, 5.0, UiStroke::new(2.5_f32, Color32::WHITE));
+                painter.circle_stroke(center, 5.0, UiStroke::new(1.0_f32, ACCENT));
+                painter.circle_filled(center, 1.5, Color32::from_gray(80));
+                if let Some(drawing) = &self.drawing {
+                    if matches!(
+                        drawing.transform,
+                        Some(crate::transform::Gesture::Scale { .. })
+                    ) {
+                        let point = drawing.last;
+                        let x = if self.mirror {
+                            1920.0 - point.x
+                        } else {
+                            point.x
+                        };
+                        let grab = paper.min + Vec2::new(x, point.y) * (width / 1920.0);
+                        painter.line_segment(
+                            [center, grab],
+                            UiStroke::new(1.0_f32, ACCENT.gamma_multiply(0.6)),
+                        );
+                        painter.circle_stroke(grab, 3.0, UiStroke::new(1.0_f32, ACCENT));
+                    }
+                }
+            }
+        }
         let pos = ctx
             .input(|i| i.pointer.hover_pos())
             .map(|pos| self.tablet.position().unwrap_or(pos))
@@ -454,6 +510,7 @@ impl Studio {
                     if let Some(center) = self.brush_wheel.take() {
                         if let Some(brush) = wheel_choice(center, pos) {
                             if self.doc.layers[self.layer].brush != brush {
+                                self.scale_tool.reset();
                                 self.doc.layers[self.layer].brush = brush;
                                 self.dirty = true;
                             }
@@ -475,8 +532,9 @@ impl Studio {
             p.circle_filled(center, 82.0, PANEL);
             p.circle_stroke(center, 82.0, UiStroke::new(1.0_f32, LINE));
             for (brush, angle) in wheel_directions() {
-                let from = angle - std::f32::consts::PI / 5.0;
-                let to = angle + std::f32::consts::PI / 5.0;
+                let half_sector = std::f32::consts::PI / wheel_directions().len() as f32;
+                let from = angle - half_sector;
+                let to = angle + half_sector;
                 let mut points = vec![center];
                 for i in 0..=32 {
                     let a = from + i as f32 / 32.0 * (to - from);
@@ -503,6 +561,10 @@ impl Studio {
         }
     }
     fn cursor(&self, p: &egui::Painter, pos: Pos2, r: f32) {
+        if self.doc.layers[self.layer].brush == Brush::Scale {
+            brush_icon(p, pos, Brush::Scale, Color32::from_gray(90));
+            return;
+        }
         if self.doc.layers[self.layer].brush == Brush::Move {
             for axis in [Vec2::X, Vec2::Y] {
                 let side = Vec2::new(-axis.y, axis.x);
@@ -1383,6 +1445,9 @@ impl Studio {
             changed = true;
         }
         if let Some(i) = delete {
+            if i <= self.layer {
+                self.scale_tool.reset();
+            }
             self.doc.layers.remove(i);
             self.layer = self.layer.min(self.doc.layers.len() - 1);
             changed = true;
@@ -1893,16 +1958,16 @@ mod tests {
         assert_eq!(followed_start(4.0, 2.0, 1.0), 1.0);
     }
     #[test]
-    fn brush_wheel_has_six_equal_sectors() {
+    fn brush_wheel_has_seven_equal_sectors() {
         let directions = wheel_directions();
         for (i, &(brush, angle)) in directions.iter().enumerate() {
             assert_eq!(
                 wheel_choice(Pos2::ZERO, Pos2::ZERO + Vec2::angled(angle) * 55.0),
                 Some(brush)
             );
-            let next = directions[(i + 1) % 6].1;
+            let next = directions[(i + 1) % directions.len()].1;
             assert!(
-                ((next - angle).rem_euclid(std::f32::consts::TAU) - std::f32::consts::TAU / 6.0)
+                ((next - angle).rem_euclid(std::f32::consts::TAU) - std::f32::consts::TAU / 7.0)
                     .abs()
                     < 1e-6
             );

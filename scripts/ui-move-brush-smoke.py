@@ -21,7 +21,7 @@ def drag(a,b):
         xd('mousemove',round(a[0]+(b[0]-a[0])*i/12),round(a[1]+(b[1]-a[1])*i/12));time.sleep(.012)
     xd('mouseup',1);time.sleep(.2)
 def brush(name):
-    choices={'round':(720,425),'marker':(768,452),'fill':(768,508),'eraser':(720,535),'liquify':(672,508),'move':(672,452)}
+    choices={'round':(720,425),'marker':(763,446),'fill':(774,492),'eraser':(744,530),'liquify':(696,530),'move':(666,492),'scale':(677,446)}
     xd('mousemove',720,480,'mousedown',3);time.sleep(.08)
     xd('mousemove',*choices[name]);time.sleep(.08);xd('mouseup',3);time.sleep(.15)
 def shot(name):
@@ -29,7 +29,7 @@ def shot(name):
     im=ImageGrab.grab(xdisplay=os.environ['DISPLAY']).convert('RGB');im.save(out/(name+'.png'));return im
 def ink(im,region):return sum(max(p)<100 for p in im.crop(region).getdata())
 with tempfile.TemporaryDirectory(prefix='mori-move-') as temp:
-    prefs=Path(temp)/'prefs.json';prefs.write_text(json.dumps({'language':'English','onion':{'enabled':False}}))
+    prefs=Path(temp)/'prefs.json';prefs.write_text(json.dumps({'language':'English','onion':{'enabled':False,'previous':3,'next':3,'before':[200,100,100],'after':[100,140,200],'opacity':0.15,'falloff':0.6}}))
     app=subprocess.Popen([str(binary)],env=dict(os.environ,MORI_PREFERENCES_PATH=str(prefs),MORI_SYSTEM_LOCALE='en-US'))
     try:
         time.sleep(1)

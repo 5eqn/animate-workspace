@@ -10,12 +10,13 @@ English · [简体中文](README.zh-CN.md)
 
 ## Brushes
 
-Hold the right mouse button to open the brush wheel. Move toward an icon and release to choose it; release in the center to keep your current brush. The six tools have equal space on the wheel:
+Hold the right mouse button to open the brush wheel. Move toward an icon and release to choose it; release in the center to keep your current brush. The seven tools have equal space on the wheel:
 
 - **Round** draws a hard round line. Pressure changes its size.
 - **Marker** draws with a flat rectangular tip. Pen tilt turns the tip; pressure changes its size.
 - **Liquify** pushes existing lines around without changing their thickness.
 - **Move** drags all strokes in the current layer together. At a new time it starts from the preceding drawing, leaving that drawing unchanged.
+- **Scale / Rotate** changes all strokes in the current layer around a chosen center. Click and release to place the center, then press elsewhere and drag: the grabbed point follows the pointer as the drawing scales and rotates. The center stays for further drags and clears when you switch brushes or layers. Stroke size scales with the picture, and the marker tip rotates with it.
 - **Eraser** removes an entire stroke when you touch it, including when you move quickly.
 - **Fill** paints the whole layer black. It is represented as a single stroke, so the eraser can remove it in one touch.
 
@@ -39,7 +40,7 @@ Scroll to pan. Pinch, or hold Command / Ctrl while scrolling, to zoom around the
 
 Double-click the tempo lane to add a BPM point. Right-click a point to set its BPM, **Division**, bars per group and beats per bar. Division is the number of steps in one beat: the default **8** gives eight positions per beat. Each point has its own setting; new points inherit the previous point's values. Changing the beat grid moves drawings to the nearest step. If two frames would overlap on one layer, later frames move forward to the next free steps.
 
-A layer keeps showing its last drawing until you change it. At a new time, Round, Marker or Fill starts a new drawing. Liquify, Move and Eraser start from the previous drawing. Erasing every stroke leaves an empty frame. In P1, Del creates an empty frame at the current time; Shift+D copies the previous frame here as an independent drawing. Undo and redo let you revisit your edits without a fixed step limit.
+A layer keeps showing its last drawing until you change it. At a new time, Round, Marker or Fill starts a new drawing. Liquify, Move, Scale / Rotate and Eraser start from the previous drawing. Erasing every stroke leaves an empty frame. In P1, Del creates an empty frame at the current time; Shift+D copies the previous frame here as an independent drawing. Undo and redo let you revisit your edits without a fixed step limit.
 
 ## Layers
 

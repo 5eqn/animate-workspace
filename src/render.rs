@@ -701,11 +701,7 @@ impl Renderer {
                 if let Some([x, y, w, h]) = dirty.pixels(size, scene.aspect) {
                     let msaa = self.multisample(gl, blur)?;
                     self.work.raster_pixels += (w as u64) * (h as u64);
-                    let mut redraw = Bounds::pixel_region([x, y, w, h], size, scene.aspect);
-                    for i in 0..2 {
-                        redraw.min[i] -= layer.cel.translation[i];
-                        redraw.max[i] -= layer.cel.translation[i];
-                    }
+                    let redraw = Bounds::pixel_region([x, y, w, h], size, scene.aspect);
                     gl.enable(glow::SCISSOR_TEST);
                     gl.scissor(x, y, w, h);
                     gl.bind_framebuffer(glow::FRAMEBUFFER, Some(msaa));
@@ -721,11 +717,6 @@ impl Renderer {
                         gl.get_uniform_location(self.ink, "canvas").as_ref(),
                         1920.0,
                         1920.0 / scene.aspect,
-                    );
-                    gl.uniform_2_f32(
-                        gl.get_uniform_location(self.ink, "translation").as_ref(),
-                        layer.cel.translation[0],
-                        layer.cel.translation[1],
                     );
                     // Rebuild only damaged pixels, including older marks underneath
                     // an erased or reshaped tip. Unchanged pixels stay on the GPU.
@@ -1002,7 +993,6 @@ impl Renderer {
         document.layers[2].cels.insert(
             0,
             Arc::new(Cel {
-                translation: [0.0; 2],
                 strokes: vec![Arc::new(stroke)],
             }),
         );

@@ -81,6 +81,34 @@ pub fn load(path: &Path) -> Result<Document, String> {
 mod tests {
     use super::*;
     #[test]
+    fn old_shared_translation_becomes_ordinary_vector_coordinates() {
+        let mut cel = crate::model::Cel::default();
+        let point = crate::model::Point {
+            x: 80.0,
+            y: 120.0,
+            pressure: 0.6,
+            angle: 0.3,
+        };
+        cel.strokes
+            .push(Arc::new(crate::model::Stroke::new(24.0, point)));
+        let mut saved = serde_json::to_value(&cel).unwrap();
+        saved["translation"] = serde_json::json!([70.0, -30.0]);
+        let loaded: crate::model::Cel = serde_json::from_value(saved).unwrap();
+        assert_eq!(
+            loaded.strokes[0].points[0],
+            crate::model::Point {
+                x: 150.0,
+                y: 90.0,
+                ..point
+            }
+        );
+        assert_eq!(loaded.strokes[0].width, 24.0);
+        assert!(!serde_json::to_value(loaded)
+            .unwrap()
+            .to_string()
+            .contains("translation"));
+    }
+    #[test]
     fn opening_legacy_projects_removes_movement_layers_and_keeps_other_content() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legacy.mori");
@@ -141,8 +169,14 @@ mod tests {
         doc.layers[0].begin_edit(0, true).translate([160.0, -40.0]);
         save(&path, &doc).unwrap();
         let loaded = load(&path).unwrap();
-        assert_eq!(loaded.layers[0].cels[&0].translation, [160.0, -40.0]);
-        assert_eq!(loaded.layers[0].cels[&0].strokes[0].points[0], point);
+        assert_eq!(
+            loaded.layers[0].cels[&0].strokes[0].points[0],
+            crate::model::Point {
+                x: point.x + 160.0,
+                y: point.y - 40.0,
+                ..point
+            }
+        );
         assert_eq!(loaded.audio.unwrap().bytes.as_slice(), [1, 2, 3, 4]);
         doc.name = "Replaced".into();
         save(&path, &doc).unwrap();

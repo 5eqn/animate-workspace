@@ -11,6 +11,7 @@ mod project;
 mod render;
 mod tablet;
 mod timing;
+mod transform;
 
 fn main() -> eframe::Result {
     timing::initialize();

@@ -22,7 +22,7 @@ def click(x,y,button=1):
     time.sleep(.25)
 
 def brush(name):
-    directions={'round':(720,425),'marker':(768,452),'fill':(768,508),'eraser':(720,535),'liquify':(672,508),'move':(672,452)}
+    directions={'round':(720,425),'marker':(763,446),'fill':(774,492),'eraser':(744,530),'liquify':(696,530),'move':(666,492),'scale':(677,446)}
     subprocess.run(['xdotool','mousemove','720','480','mousedown','3'],check=True)
     time.sleep(.1)
     x,y=directions[name]
@@ -122,11 +122,11 @@ with tempfile.TemporaryDirectory(prefix='mori-ui-') as temporary:
         def selected_brush():
             subprocess.run(['xdotool','mousemove','720','480','mousedown','3'],check=True);time.sleep(.2)
             picture=shot('brush-memory')
-            names=['round','marker','fill','eraser','liquify','move']
+            names=['round','marker','fill','eraser','liquify','move','scale']
             import math
-            colors=[picture.getpixel((round(720+math.cos(-math.pi/2+i*math.tau/6)*70),round(480+math.sin(-math.pi/2+i*math.tau/6)*70))) for i in range(6)]
+            colors=[picture.getpixel((round(720+math.cos(-math.pi/2+i*math.tau/7)*70),round(480+math.sin(-math.pi/2+i*math.tau/7)*70))) for i in range(7)]
             subprocess.run(['xdotool','mouseup','3'],check=True);time.sleep(.1)
-            return names[max(range(6),key=lambda i:colors[i][2])]
+            return names[max(range(7),key=lambda i:colors[i][2])]
         assert selected_brush()=='round'
         key('w');assert selected_brush()=='marker','Second layer is not Marker'
         brush('liquify');key('s');assert selected_brush()=='round','Brush leaked to the previous layer'

@@ -41,7 +41,6 @@ struct LayerKey {
     style: i32,
     inverted: bool,
     strength: u32,
-    translation: [u32; 2],
     strokes: Vec<StrokeKey>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,7 +62,6 @@ impl SceneKey {
                     style: l.style.id(),
                     inverted: l.inverted,
                     strength: l.strength.to_bits(),
-                    translation: l.cel.translation.map(f32::to_bits),
                     strokes: l.cel.strokes.iter().map(|s| StrokeKey::new(s)).collect(),
                 })
                 .collect(),
@@ -204,7 +202,6 @@ pub(super) struct RasterState {
     pub flow: bool,
     pub initialized: bool,
     aspect: u32,
-    translation: [u32; 2],
 }
 impl RasterState {
     pub fn new(flow: bool) -> Self {
@@ -213,16 +210,12 @@ impl RasterState {
             flow,
             initialized: false,
             aspect: 0,
-            translation: [0; 2],
         }
     }
     pub fn update(&mut self, cel: &Cel, flow: bool, aspect: f32) -> Option<Bounds> {
         let mut dirty = Bounds::empty();
         let aspect_changed = self.aspect != aspect.to_bits();
-        let full = !self.initialized
-            || self.flow != flow
-            || aspect_changed
-            || self.translation != cel.translation.map(f32::to_bits);
+        let full = !self.initialized || self.flow != flow || aspect_changed;
         let fill = cel.strokes.iter().any(|s| s.brush == Brush::Fill)
             || self
                 .strokes
@@ -250,13 +243,7 @@ impl RasterState {
         }
         if full || fill {
             dirty = Bounds::canvas(aspect);
-        } else {
-            dirty.min[0] += cel.translation[0];
-            dirty.min[1] += cel.translation[1];
-            dirty.max[0] += cel.translation[0];
-            dirty.max[1] += cel.translation[1];
         }
-        self.translation = cel.translation.map(f32::to_bits);
         self.flow = flow;
         self.aspect = aspect.to_bits();
         self.initialized = true;
@@ -281,7 +268,6 @@ mod tests {
         let mut stroke = Stroke::new(20.0, point(100.0, 200.0));
         stroke.points = (0..1000).map(|i| point(100.0 + i as f32, 200.0)).collect();
         let mut cel = Cel {
-            translation: [0.0; 2],
             strokes: vec![Arc::new(stroke)],
         };
         let mut state = RasterState::new(false);
@@ -294,7 +280,6 @@ mod tests {
     #[test]
     fn aspect_changes_repaint_even_when_pixel_dimensions_are_unchanged() {
         let cel = Cel {
-            translation: [0.0; 2],
             strokes: vec![Arc::new(Stroke::new(40.0, point(100.0, 200.0)))],
         };
         let mut state = RasterState::new(false);
@@ -313,7 +298,6 @@ mod tests {
         let mut stroke = Stroke::new(20.0, point(100.0, 200.0));
         stroke.points = (0..1000).map(|i| point(100.0 + i as f32, 200.0)).collect();
         let mut cel = Cel {
-            translation: [0.0; 2],
             strokes: vec![Arc::new(stroke)],
         };
         let mut state = RasterState::new(false);
@@ -328,7 +312,6 @@ mod tests {
     #[test]
     fn pressure_shrink_and_erasing_include_the_old_covered_pixels() {
         let mut cel = Cel {
-            translation: [0.0; 2],
             strokes: vec![Arc::new(Stroke::new(400.0, point(500.0, 400.0)))],
         };
         let mut state = RasterState::new(false);

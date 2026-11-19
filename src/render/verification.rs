@@ -116,15 +116,14 @@ impl Renderer {
             result
         };
         assert_eq!(moved, fresh, "Moved raster did not survive fresh rendering");
-        // Subsequent ink uses local coordinates, including when its bounds fall
-        // outside the original page. The displayed point must stay under the pen.
+        // Subsequent ink stays in ordinary canvas coordinates.
         let cel = doc.layers[0].begin_edit(0, true);
-        let point = cel.local_point(Point {
+        let point = Point {
             x: 100.0,
             y: 100.0,
             pressure: 1.0,
             angle: 0.0,
-        });
+        };
         cel.strokes.push(Arc::new(Stroke::new(20.0, point)));
         let edited = self.read_frame(gl, &doc.scene(0), [960, 480]).unwrap();
         assert!(
@@ -136,13 +135,92 @@ impl Renderer {
         let mut fill = Stroke::new(20.0, point);
         fill.brush = Brush::Fill;
         cel.strokes.push(Arc::new(fill));
-        cel.translation = [4000.0, -3000.0];
+        cel.translate([4000.0, -3000.0]);
         let pixels = self.read_frame(gl, &doc.scene(0), [960, 480]).unwrap();
         assert!(
             pixels.as_chunks::<4>().0.iter().all(|p| p[..3] == [0; 3]),
             "Moving an infinite fill clipped it"
         );
         "Move brush: translation matches shifted pixels and fresh renders; subsequent ink aligns and infinite Fill stays black".into()
+    }
+    pub unsafe fn verify_scale_rotation(&mut self, gl: &glow::Context) -> String {
+        use crate::{model::*, transform::Similarity};
+        let mut doc = Document::default();
+        doc.layers.truncate(1);
+        doc.settings.watermark = false;
+        let point = Point {
+            x: 800.0,
+            y: 350.0,
+            pressure: 0.65,
+            angle: 0.2,
+        };
+        let mut round = Stroke::new(40.0, point);
+        round.points.push(Point {
+            x: 1000.0,
+            y: 450.0,
+            pressure: 0.4,
+            ..point
+        });
+        let mut marker = Stroke::new(
+            120.0,
+            Point {
+                x: 1200.0,
+                y: 360.0,
+                ..point
+            },
+        );
+        marker.brush = Brush::Marker;
+        marker.points.push(Point {
+            x: 1300.0,
+            y: 480.0,
+            angle: -0.3,
+            ..point
+        });
+        doc.layers[0].begin_edit(0, false).strokes = vec![Arc::new(round), Arc::new(marker)];
+        let source = doc.layers[0].held(0).unwrap().as_ref().clone();
+        self.read_frame(gl, &doc.scene(0), [960, 402]).unwrap();
+        let center = Point {
+            x: 960.0,
+            y: 400.0,
+            ..point
+        };
+        let grab = Point {
+            x: 1060.0,
+            ..center
+        };
+        let target = Point { y: 550.0, ..center };
+        Similarity::around(center, grab, target)
+            .unwrap()
+            .apply(&source, doc.layers[0].begin_edit(0, true));
+        let actual = self.read_frame(gl, &doc.scene(0), [960, 402]).unwrap();
+        let mut expected = doc.clone();
+        let cel = expected.layers[0].begin_edit(0, false);
+        for (stroke, original) in cel.strokes.iter_mut().zip(&source.strokes) {
+            let stroke = Arc::make_mut(stroke);
+            stroke.id = next_revision();
+            stroke.width = original.width * 1.5;
+            for (point, original) in stroke.points.iter_mut().zip(&original.points) {
+                *point = Point {
+                    x: 960.0 - (original.y - 400.0) * 1.5,
+                    y: 400.0 + (original.x - 960.0) * 1.5,
+                    angle: original.angle + std::f32::consts::FRAC_PI_2,
+                    ..*original
+                };
+            }
+            stroke.invalidate_from(0);
+        }
+        let mut fresh = Self::new(gl).unwrap();
+        let expected = fresh
+            .read_frame(gl, &expected.scene(0), [960, 402])
+            .unwrap();
+        fresh.destroy(gl);
+        assert_eq!(
+            actual, expected,
+            "Scale/rotate differs from drawing the final vectors directly"
+        );
+        let saved = serde_json::to_string(&doc).unwrap();
+        assert!(!saved.contains("translation") && !saved.contains("linear"));
+        "Scale/rotate matches independently constructed final vectors, including marker orientation, pressure, width and retained rendering".into()
     }
     pub unsafe fn verify_sampler_bindings(&mut self, gl: &glow::Context) {
         use crate::model::*;

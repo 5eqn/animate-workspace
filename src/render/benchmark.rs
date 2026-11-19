@@ -44,6 +44,9 @@ pub unsafe fn run(gl: &glow::Context, size: [i32; 2]) -> serde_json::Value {
         "liquify",
         "liquify_dense",
         "move_brush",
+        "move_dense",
+        "scale_rotate",
+        "scale_rotate_dense",
         "blur",
         "blur_chromatic",
         "onion_six",
@@ -55,7 +58,7 @@ pub unsafe fn run(gl: &glow::Context, size: [i32; 2]) -> serde_json::Value {
         let mut doc = if name == "blank" {
             Document::default()
         } else {
-            document(name == "liquify_dense")
+            document(name.ends_with("_dense"))
         };
         let mut index = SpatialIndex::new(
             doc.layers[0].held(0).map_or(&Cel::default(), |cel| cel),
@@ -100,6 +103,9 @@ pub unsafe fn run(gl: &glow::Context, size: [i32; 2]) -> serde_json::Value {
         } else {
             Vec::new()
         };
+        let original = doc.layers[0]
+            .held(0)
+            .map_or_else(Cel::default, |cel| (**cel).clone());
         let query = gl.create_query().unwrap();
         let mut cpu = Vec::new();
         let mut gpu = Vec::new();
@@ -127,8 +133,24 @@ pub unsafe fn run(gl: &glow::Context, size: [i32; 2]) -> serde_json::Value {
                     320.0,
                     0.6,
                 );
-            } else if name == "move_brush" {
-                doc.layers[0].begin_edit(0, true).translate([5.0, 1.0]);
+            } else if matches!(name, "move_brush" | "move_dense") {
+                crate::transform::Similarity::moving(
+                    point(0.0, 0.0),
+                    point(step as f32 * 5.0, step as f32),
+                )
+                .apply(&original, doc.layers[0].begin_edit(0, true));
+            } else if name.starts_with("scale_rotate") {
+                let t = step as f32 * 0.01;
+                crate::transform::Similarity::around(
+                    point(960.0, 400.0),
+                    point(1300.0, 400.0),
+                    point(
+                        960.0 + 340.0 * t.cos() * (1.0 + t),
+                        400.0 + 340.0 * t.sin() * (1.0 + t),
+                    ),
+                )
+                .unwrap()
+                .apply(&original, doc.layers[0].begin_edit(0, true));
             }
             let view = View {
                 scene: doc.scene(0),

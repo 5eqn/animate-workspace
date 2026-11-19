@@ -84,11 +84,11 @@ codegen-units=1
     (temp/'Cargo.toml').write_text(manifest)
     shutil.copy2(root/'Cargo.lock',temp/'Cargo.lock')
     (temp/'src').mkdir()
-    for name in ['model','curve','render','timing']:
+    for name in ['model','curve','render','timing','transform']:
         shutil.copy2(root/'src'/(name+'.rs'), temp/'src'/(name+'.rs'))
     shutil.copytree(root/'src/render',temp/'src/render')
     shutil.copytree(root/'shaders',temp/'shaders')
-    modules='\n'.join('mod '+name+';' for name in ['model','curve','render','timing'])
+    modules='\n'.join('mod '+name+';' for name in ['model','curve','render','timing','transform'])
     (temp/'src/bench.rs').write_text('''#![allow(dead_code)]
 '''+modules+'''
 #[link(name="EGL")]
